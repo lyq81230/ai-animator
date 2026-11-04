@@ -75,7 +75,7 @@ output/<素材名>/
 | `seethrough_repo/` | 第三方分层推理代码 | 约 100MB |
 | `output/` `_tmp_trim/` | 运行产物 | — |
 
-## 更多
+## 说明
 
-详细的参数含义、图层命名规则、各类素材问题的处理逻辑（头饰合并、长袍没腿、白边、残影补偿……）
-都在 [docs/NOTES.md](docs/NOTES.md)。
+这是个人自用工具，文档只写到能上手为止。参数细节和各素材问题的处理逻辑散在脚本注释里，
+`build_from_seethrough.py`、`gen_idle_bones.py` 开头的说明基本覆盖了主要规则。
