@@ -1987,64 +1987,6 @@ def gen_death(sk, info, args, fps, dur):
     return anim, F, T
 
 
-def _squash_eye_track(anim, info, args, fps, F, action, dur):
-    """把眼睛层垂直压扁成一条缝来做"闭眼"。
-
-    为什么不用闭眼补丁: 这套素材里 AI 分层给的 `eyes_closed` 其实是**睁眼重绘**
-    (有眼白和红瞳, 实测 5 个角色里 4 个能测出 >12% 眼白), 拿它当补丁,
-    眨眼瞬间是把"睁着的眼睛"再盖一层上去 —— 看起来就是重影/没闭上。
-    压扁自己的眼睛层反而干净: 眼白+瞳孔+睫毛一起压成线, 视觉上就是闭眼。
-    """
-    feat = info.get("feat_bones") or {}
-    names = [n for n in ("eyewhite", "irides", "eyelash") if n in feat]
-    if not names:
-        return False
-    tt = np.arange(F + 1) / fps
-    if action == "walk":
-        times = [dur * f for f in (0.28, 0.63, 0.88)]
-    elif action == "hit":
-        times = [max(0.08, 0.14 * dur)]
-    elif action == "death" and getattr(args, "death_close_eye", 1) \
-            and info.get("_eye_close_t"):
-        times = [float(info["_eye_close_t"])]
-    else:
-        times = [float(x) for x in str(getattr(args, "blink_at", "")).split(",")
-                 if x.strip()]
-    times = [t for t in times if 0.02 < t < dur]
-
-    def closed_at(t):
-        c = 0.0
-        for bt in times:
-            d = abs(t - bt)
-            if d < args.blink_dur:
-                c = max(c, 0.5 * (1 + math.cos(math.pi * d / args.blink_dur)))
-        return min(1.0, c * float(args.blink_depth) / 0.72)
-
-    # 压到 8% 高: 眼白/瞳孔/睫毛一起变成一条缝
-    depth = 0.92
-    if action == "death" and times:
-        # 死亡闭眼要"闭住不睁"
-        for n in names:
-            b = feat[n]
-            kf = [{"time": 0.0, "x": 1.0, "y": 1.0}, ]
-            t0 = max(0.0, times[0] - 0.06)
-            kf.append({"time": round(t0, 5), "x": 1.0, "y": 1.0})
-            kf.append({"time": round(times[0], 5), "x": 1.0, "y": round(1 - depth, 4)})
-            kf.append({"time": round(F / fps, 5), "x": 1.0, "y": round(1 - depth, 4)})
-            anim.setdefault("bones", {}).setdefault(b.name, {})["scale"] = kf
-        return True
-
-    for n in names:
-        b = feat[n]
-        kf = []
-        for fi in range(F + 1):
-            c = closed_at(tt[fi]) if times else 0.0
-            kf.append({"time": round(fi / fps, 5), "x": 1.0,
-                       "y": round(1.0 - depth * c, 4)})
-        anim.setdefault("bones", {}).setdefault(b.name, {})["scale"] = kf
-    return True
-
-
 def _eye_closed_track(anim, info, args, fps, F, action, dur):
     """闭眼补丁的缩放轨道: 平时缩到 0(看不见), 倒地落地后放大到 1(盖住眼睛)。
 
