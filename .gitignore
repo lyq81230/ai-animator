@@ -1,0 +1,47 @@
+# ===== 大体积运行时依赖（不纳入版本库）=====
+# 便携版 Python 解释器 + 依赖（约 8GB）
+python/
+# AI 模型权重（约 20GB）：layerdiff3d / marigold / sdxl_scheduler
+models/
+
+# ===== 第三方代码 =====
+seethrough_repo/
+
+# ===== 生成产物 =====
+output/
+_tmp_trim/
+_bak_all_1036/
+*.spine.json.bak
+
+# ===== 调试截图 / 临时渲染图 =====
+*.png
+*.jpg
+*.jpeg
+*.webp
+!docs/*.png
+!docs/*.jpg
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 本地配置与密钥 =====
+.env
+*.local
+secrets.json
+
+# ===== Agent 工作区数据 =====
+.workbuddy/
