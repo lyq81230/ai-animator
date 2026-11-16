@@ -1,0 +1,7 @@
+{
+  "_comment": "索戴的是全甲头盔, 黄头巾是塞在盔内的, 不能随风飘 —— 强制 100% 绑头骨",
+  "rigid": {
+    "headwear_overlay": "head",
+    "headwear_overlay_2": "head"
+  }
+}

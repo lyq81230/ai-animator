@@ -124,7 +124,13 @@ def make_preview(parts_dir, coords_path, out_png, log=print):
     comp = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     missing = []
     roles = {}
-    for p in parts:
+    # 必须按【绘制顺序】叠: coords 里的数组顺序只是拆图顺序, 真正的遮挡由 z 决定。
+    # 按数组顺序画会骗人 —— 体检图看着肩甲在躯干前面, 生成出来却在后面(用户:
+    # "右肩膀Z轴仍显示错误")。
+    _order = sorted(range(len(parts)),
+                    key=lambda i: (float(parts[i].get("z", 0) or 0), i))
+    for _i in _order:
+        p = parts[_i]
         path = os.path.join(parts_dir, p.get("image", ""))
         if not p.get("image") or not os.path.isfile(path):
             missing.append(p.get("name", "?"))

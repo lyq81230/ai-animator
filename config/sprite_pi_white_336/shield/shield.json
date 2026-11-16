@@ -1,0 +1,12 @@
+{
+  "name": "objects_R",
+  "image": "objects_R.png",
+  "x": 203,
+  "y": 155,
+  "width": 45,
+  "height": 126,
+  "grid": [4, 4],
+  "cls": "prop",
+  "follow_part": "arm_fore_R",
+  "_note": "盾的可见部分（弓形）模板 + 在 336 画布上的位置。原来这份数据只存在于一次性的 _bak_parts_1931/ 里，被清掉后 extract_shield.py 直接崩；现在跟 config 一起进仓库。坐标由源图模板匹配复核，对不上时用这里的值。"
+}

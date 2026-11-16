@@ -51,7 +51,7 @@ def build_grid_mesh(px, py, w, h, gx, gy):
       uvs         : [u, v, ...]      flat, 与 verts 对应 (top-left 原点)
       triangles   : [i0,i1,i2, ...]
       hull        : int  外壳顶点数 (前 hull 个顶点为外壳, 顺时针)
-      edges       : [a,b, ...]       外壳边 (顶点索引 *2)
+      edges       : [a,b, ...]       外壳边(索引值 = 顶点序号 * 2, 官方导出器即如此)
 
     顶点排序: 先外壳(顺时针一圈)再内部, 满足 Spine 对 hull 的要求。
     """
@@ -109,6 +109,8 @@ def build_grid_mesh(px, py, w, h, gx, gy):
     # --- 外壳边 ---
     edges = []
     for k in range(hull):
+        # Spine 官方导出器实测: 4 个顶点的网格 edges = [0,2, 2,4, 4,6, 0,6],
+        # 即【顶点序号 × 2】(索引 uv 的浮点位置), 不是顶点序号本身。
         edges += [k * 2, ((k + 1) % hull) * 2]
 
     return verts_video, uvs, triangles, hull, edges

@@ -1,0 +1,147 @@
+{
+  "objects_L": {
+    "box": [
+      28,
+      180,
+      104,
+      304
+    ],
+    "exclude": [
+      [
+        84,
+        150,
+        102,
+        198
+      ],
+      [
+        80,
+        192,
+        90,
+        214
+      ]
+    ],
+    "cls": "prop",
+    "follow": "arm_fore_L",
+    "keep_main": 200
+  },
+  "objects_R": {
+    "box": [
+      245,
+      182,
+      312,
+      300
+    ],
+    "exclude": [
+      [
+        230,
+        184,
+        250,
+        214
+      ],
+      [
+        248,
+        196,
+        258,
+        222
+      ]
+    ],
+    "cls": "prop",
+    "follow": "arm_fore_R",
+    "keep_main": 200
+  },
+  "leg_L_up": {
+    "box": [
+      106,
+      196,
+      156,
+      258
+    ],
+    "cls": "leg",
+    "keep_main": 200
+  },
+  "leg_L_low": {
+    "box": [
+      104,
+      254,
+      156,
+      308
+    ],
+    "cls": "leg",
+    "keep_main": 200
+  },
+  "leg_R_up": {
+    "box": [
+      180,
+      196,
+      234,
+      258
+    ],
+    "cls": "leg",
+    "keep_main": 200
+  },
+  "leg_R_low": {
+    "box": [
+      180,
+      254,
+      236,
+      310
+    ],
+    "cls": "leg",
+    "keep_main": 200
+  },
+  "head": {
+    "boxes": [
+      [
+        146,
+        10,
+        202,
+        79
+      ],
+      [
+        160,
+        79,
+        192,
+        87
+      ]
+    ],
+    "exclude": [
+      [
+        140,
+        66,
+        157,
+        96
+      ],
+      [
+        191,
+        66,
+        208,
+        96
+      ]
+    ],
+    "no_steal": true,
+    "keep_main": 150
+  },
+  "headwear": {
+    "clear": true
+  },
+  "headwear_full": {
+    "clear": true
+  },
+  "wings": {
+    "box": [
+      55,
+      15,
+      305,
+      305
+    ],
+    "subtract_others": true,
+    "cls": "body",
+    "keep_main": 400
+  },
+  "arm_hand_L": {
+    "clear": true
+  },
+  "arm_hand_R": {
+    "clear": true
+  }
+}

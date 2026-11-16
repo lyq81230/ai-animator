@@ -46,13 +46,13 @@ MODEL_JOBS = [
      ["scheduler/*"]),
 ]
 
-# 可选模型: **只下载归档, 不参与推理**。
-# 不进"就绪"判定, 也不会被 infer_cmd 引用(infer_cmd 固定走 nf4 那两份)。
-# 仅在明确要跑未量化基线时手动用 `--quant_mode none` 指定。
+# 可选模型: 不进"就绪"判定(量化版三个目录齐了就算就绪), 但**会被用到** ——
+# 界面上勾了「全参数模型」时 infer_cmd 会把 layerdiff 换成本目录里的 bf16 权重。
+# 没下载时 full_ready() 返回 False, 自动回退量化版, 不会报错。
 # 用 `python st_download.py --full` 下载。
 OPTIONAL_JOBS = [
     # 全参数(未量化) layerdiff3d, 对应 --quant_mode none。UNet 单文件 8.1GB,
-    # 6GB 显卡放不下, 需要 12GB 以上显存或 CPU offload。
+    # 需要 12GB 以上显存(或靠分组 offload 硬挤)。
     ("layerdifforg/seethroughv0.0.2_layerdiff3d", "layerdiff3d_bf16", None),
 ]
 
@@ -77,6 +77,13 @@ REQUIRED = {
         "tokenizer/vocab.json": 500_000,
         "unet/diffusion_pytorch_model.safetensors": 3_000_000_000,
         "vae/diffusion_pytorch_model.safetensors": 300_000_000,
+    },
+    "layerdiff3d_bf16": {  # 全参数(未量化) layerdiff3d
+        "unet/diffusion_pytorch_model.safetensors": 7_000_000_000,
+        "vae/diffusion_pytorch_model.safetensors": 100_000_000,
+        "trans_vae/diffusion_pytorch_model.safetensors": 100_000_000,
+        "text_encoder/model.safetensors": 100_000_000,
+        "text_encoder_2/model.safetensors": 800_000_000,
     },
     "sdxl_scheduler": {  # 调度器只有 config, 没有权重
         "scheduler/scheduler_config.json": 50,
@@ -135,6 +142,50 @@ def ready():
     return os.path.isfile(script) and deps_ok(py) and models_ok(models)
 
 
+def dir_ok(models, sub):
+    """某个模型目录是否真下全了(按 REQUIRED 的文件+最小体积判断)。"""
+    d = os.path.join(models, sub)
+    if not os.path.isdir(d):
+        return False
+    for rel, minsize in REQUIRED.get(sub, {}).items():
+        p = os.path.join(d, rel.replace("/", os.sep))
+        if not os.path.isfile(p) or os.path.getsize(p) < minsize:
+            return False
+    return True
+
+
+def full_ready(models=None):
+    """全参数模型(layerdiff3d_bf16)是否已下载完整。没下全就只能走量化版。"""
+    return dir_ok(models or paths()[2], "layerdiff3d_bf16")
+
+
+def model_text(full=False):
+    """日志/界面用的一行说明, 同时告诉用户"选了全参数但没权重"的情况。"""
+    if not full:
+        return "量化版 layerdiff3d_nf4 (快、约 8GB 显存)"
+    if not full_ready():
+        return ("全参数权重缺失 (models/layerdiff3d_bf16), 已自动回退量化版; "
+                "要全参数先跑 python st_download.py --full")
+    return "全参数 bf16 layerdiff3d_bf16 (质量最好、需 ~14GB 显存、慢数倍)"
+
+
+def gpu_free_gb():
+    """当前空闲显存(GB); 查不到返回 None。只用来给提示, 不参与任何判定。"""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        vals = [float(x) for x in (r.stdout or "").replace("\r", "").split()
+                if x.replace(".", "", 1).isdigit()]
+        return max(vals) / 1024.0 if vals else None
+    except Exception:      # noqa: BLE001
+        return None
+
+
+FULL_NEED_GB = 11.5        # 全参数实测: 8.14GB UNet + VAE/TE(bf16) + 推理中间量
+
+
 def status_text():
     py, repo, models = paths()
     if not os.path.isfile(os.path.join(repo, "inference", "scripts",
@@ -175,19 +226,44 @@ def install_steps():
 
 
 # ------------------------------------------------------------------ 推理调用
-def infer_cmd(image):
-    """平面图 -> see-through 分层。返回 (cmd, env, cwd, out_dir)。"""
+def infer_cmd(image, full=False):
+    """平面图 -> see-through 分层。返回 (cmd, env, cwd, out_dir)。
+
+    full=True  全参数(bf16, 未量化) layerdiff3d_bf16 + marigold-base：
+               质量最好, 但要 ~14GB 显存、单张图慢好几倍。
+    full=False 量化(nf4) layerdiff3d_nf4 + marigold_nf4：快、省显存, 默认。
+    由界面上的「全参数模型」复选框决定; 环境变量 SEETHROUGH_QUANT 仍可强制覆盖
+    (设成 none/full 就是全参数, nf4 就是量化)。
+    """
     py, repo, models = paths()
     name = os.path.splitext(os.path.basename(image))[0]
     script = os.path.join(repo, "inference", "scripts",
                           "inference_psd_quantized.py")
-    # quant_mode 显式钉成 nf4: 不依赖脚本里 argparse 的默认值。
-    # layerdiff3d_bf16(全参数/未量化) 只下载归档, 不参与推理 ——
-    # 它的 UNet 单文件 8.14GB, 6GB 显卡根本载入不了。
+    force = (os.environ.get("SEETHROUGH_QUANT") or "").strip().lower()
+    if force in ("none", "full", "bf16"):
+        full = True
+    elif force == "nf4":
+        full = False
+    # 选了全参数但权重没下全: 硬跑会在 from_pretrained 时报"找不到文件",
+    # 还不如直接退回量化版把图拆出来(界面日志里 model_text 会写明回退了)。
+    if full and not full_ready(models):
+        full = False
+    if full:
+        # layerdiff 用全参数; depth 只能用 marigold_nf4 —— 调用方喂给 marigold 的是
+        # 12 通道的 framed latent, 而 marigold-base 是 8 通道的普通 UNet,
+        # 直接喂会 "expected 8 channels, got 12"。depth 只决定图层前后顺序,
+        # 量化与否对最终分层几乎没有影响。
+        qmode, ld, dp = "none", "layerdiff3d_bf16", "marigold_nf4"
+    else:
+        qmode, ld, dp = "nf4", "layerdiff3d_nf4", "marigold_nf4"
     cmd = [py, script, "--srcp", image, "--save_to_psd", "--tblr_split",
-           "--no_group_offload", "--resolution", "768", "--quant_mode", "nf4",
-           "--repo_id_layerdiff", os.path.join(models, "layerdiff3d_nf4"),
-           "--repo_id_depth", os.path.join(models, "marigold_nf4")]
+           "--resolution", "768", "--quant_mode", qmode,
+           "--repo_id_layerdiff", os.path.join(models, ld),
+           "--repo_id_depth", os.path.join(models, dp)]
+    if qmode == "nf4":
+        # 量化版够小, 关掉分组 offload 换速度; 全参数版保留默认的 group_offload,
+        # 否则 8.14GB 的 UNet 会在小显存卡上直接 OOM
+        cmd.append("--no_group_offload")
     sched = os.path.join(models, "sdxl_scheduler")
     extra = {
         "MARIGOLD_BASE": os.path.join(models, "marigold-base"),

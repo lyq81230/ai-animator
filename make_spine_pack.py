@@ -114,6 +114,24 @@ def build(items, out, name=None):
     open(os.path.join(out_dir, name + ".atlas"), "w", encoding="utf-8", newline="\n") \
         .write(build_atlas(rects, W, H, lines, png_name))
 
+    # ---- 网格 uv 保持"每块区域自己的 0~1" —— 不要换算成整张图集坐标 ----
+    # Spine(3.8 与 4.0 都一样) 的 mesh uvs 是**相对该网格自己的 texture region** 的。
+    # 运行时/编辑器会自己 + region.u 再映射一次。之前这里把它们换算成整页坐标,
+    # 于是真实工具里每个部件都被二次映射, 采到图集上别的地方 —— 表现就是"位置对、
+    # 贴图变成拼布"(官方 spineboy 3.8 的 goggles uvs 是 0~1, 已核对)。
+    # gen_idle_bones 产出的就是区域局部的 0~1, 保持原样即可。
+    outside = []
+    for skin in doc["skins"]:
+        for _s, att in (skin.get("attachments") or {}).items():
+            for aname, ad in att.items():
+                if ad.get("type") != "mesh" or not ad.get("uvs"):
+                    continue
+                uv = ad["uvs"]
+                if min(uv) < -0.01 or max(uv) > 1.01:
+                    outside.append(aname)
+    if outside:
+        print("  !! uv 超出 0~1(应为区域局部坐标):", ", ".join(sorted(set(outside))))
+
     # attachment 的 path 写成图集里的 region 名(不带扩展名), Spine 默认就用附件名
     for skin in doc["skins"]:
         for sname, att in (skin.get("attachments") or {}).items():

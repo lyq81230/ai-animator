@@ -19,7 +19,18 @@ DEFAULT_SRC = "E:/pic/sprite_boss_lvbu_white_336.png"
 
 def main():
     D = sys.argv[1]
-    SRC = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_SRC
+    # 第二个参数可以是源图; 不传就按输出目录名去 E:/pic 找同名 png
+    SRC = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else ""
+    if SRC and not os.path.isfile(SRC):
+        SRC = ""
+    if not SRC:
+        cand = os.path.join("E:/pic", os.path.basename(os.path.normpath(D)) + ".png")
+        SRC = cand if os.path.isfile(cand) else DEFAULT_SRC
+    # 阈值: 默认 8 只补"完全没人画"的地方; 给 200 会把"两边都只有半透明边"的
+    # 1px 白缝也算洞补上(渲染出来才不会有一条亮线)
+    al = 8
+    if "--alpha" in sys.argv:
+        al = int(sys.argv[sys.argv.index("--alpha") + 1])
     c = json.load(open(os.path.join(D, "coords.json"), encoding="utf-8"))
     W, H = c["canvas"]["w"], c["canvas"]["h"]
     src = np.array(Image.open(SRC).convert("RGBA"))
@@ -32,8 +43,8 @@ def main():
 
     lab = np.zeros((H, W), np.int32)
     for i, p in enumerate(c["parts"], 1):
-        lab[canvas_of(p)[..., 3] > 8] = i
-    hole = (src[..., 3] > 8) & (lab == 0)
+        lab[canvas_of(p)[..., 3] > al] = i
+    hole = (src[..., 3] > al) & (lab == 0)
     print(f"空洞 {int(hole.sum())}px")
     if not hole.any():
         return
@@ -60,8 +71,8 @@ def main():
 
     lab2 = np.zeros((H, W), np.int32)
     for i, p in enumerate(c["parts"], 1):
-        lab2[canvas_of(p)[..., 3] > 8] = i
-    print(f"剩余空洞 {int(((src[...,3]>8)&(lab2==0)).sum())}px")
+        lab2[canvas_of(p)[..., 3] > al] = i
+    print(f"剩余空洞 {int(((src[...,3]>al)&(lab2==0)).sum())}px")
     json.dump(c, open(os.path.join(D, "coords.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
 

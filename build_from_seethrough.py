@@ -575,8 +575,13 @@ def _repair_face_split(parts, out_dir, layers_dir, src_rgba, W, H, frame=None):
     return parts
 
 
-_REPAINT_SLOTS = ("head", "eyewhite", "irides", "eyelash", "eyebrow",
-                  "nose", "mouth", "eyes_closed")
+# 注意: 不要放 eyes_closed —— 它是 `_make_closed_eyes` 现合成的"皮肤色 + 眼线",
+# 按原图重铺颜色会把它变回"睁眼"(原图那块就是睁着的眼睛), 闭眼补丁就失效了。
+# 以前只铺脸。实测躯干/手臂漂移同样厉害(topwear 与源图平均色差 36, 手臂 22),
+# 结果肩甲、胸甲的明暗和原画"完全不一样"。现在默认全铺, 只排除眼睛/毛孔这类
+# 刻意合成的部件(见下面 eyes_closed 的说明)。
+_REPAINT_SLOTS = None
+_REPAINT_SKIP = ("eyes_closed",)
 
 
 def _repaint_from_source(parts, out_dir, src_rgba, W, H, names=_REPAINT_SLOTS):
@@ -588,6 +593,8 @@ def _repaint_from_source(parts, out_dir, src_rgba, W, H, names=_REPAINT_SLOTS):
     """
     if src_rgba is None:
         return parts
+    if names is None:
+        names = [q["name"] for q in parts if q["name"] not in _REPAINT_SKIP]
     for p in parts:
         if p["name"] not in names:
             continue
@@ -720,6 +727,11 @@ except Exception:         # noqa: BLE001
 PARTS_SCHEMA = 3       # 拆图结果结构版本(1=最早 16 部件, 2=加腿/道具, 3=切片腿+头巾合并)
 MIN_PIXELS = 200       # alpha 非零像素低于此值视为空层丢弃(整块部件)
 PX_PER_CELL = 55
+
+# 默认丢弃的层。head 层是"原图整头"(眼睛眉毛都在里面), 再叠 AI 单独拆的
+# eyelash/eyebrow 只会变成双重描边/重影 —— 用户:"去除 eyelash, eyebrow 图片"。
+# 想保留就显式传 --drop-parts ""。
+DEFAULT_DROP_PARTS = "eyelash,eyebrow"
 
 # 小特征槽位: 用更低的像素阈值, 否则"红瞳 141px"这种会被当成噪声扔掉
 # 小特征的最小像素: 336 画布上眼睛/嘴可能只有 20~30px(董卓的嘴 21px),
@@ -1083,8 +1095,10 @@ def _make_closed_eyes(parts, out_dir):
             continue
         cy = byy + bh * 0.55 - y0                # 眼球偏下一点, 像眼皮压下来的位置
         xa, xb = bx - x0 + 1, bx - x0 + bw - 1
-        dr.line([(xa, cy - 1), (xa + (xb - xa) * 0.5, cy + 1.6), (xb, cy - 1)],
-                fill=lash_rgb + (255,), width=2)
+        # 略粗一点、中段再下沉一些, 才像"上眼皮压下来"的闭眼弧
+        wdt = max(2, int(round(bh * 0.16)))
+        dr.line([(xa, cy - 1.0), (xa + (xb - xa) * 0.5, cy + max(2.0, bh * 0.18)),
+                 (xb, cy - 1.0)], fill=lash_rgb + (255,), width=wdt)
     patch.save(os.path.join(out_dir, "eyes_closed.png"))
 
     # 插到 eye 层之后(压住所有眼睛层)
@@ -2002,6 +2016,10 @@ def main():
                     help="腿切片在膝处的重叠像素(遮掩张开的细缝)")
     ap.add_argument("--no-leg-split", action="store_true",
                     help="禁用 legwear 左右腿拆分(回退整层, 腿就不能迈步)")
+    ap.add_argument("--drop-parts", default=DEFAULT_DROP_PARTS,
+                    help="拆图后丢弃这些部件(逗号分隔)。头部层已经是原图整头(含完整五官),"
+                         "再叠一层 eyelash/eyebrow 就是双重描边/重影, 所以默认丢掉这两个;"
+                         "想要保留它们传 --drop-parts \"\"")
     ap.add_argument("--no-closed-eyes", action="store_true",
                     help="不生成闭眼补丁(死亡时就闭不上眼)")
     ap.add_argument("--no-fill-missing", action="store_true",
@@ -2553,6 +2571,27 @@ def main():
     parts = _repaint_from_source(parts, args.out, src_rgba, W, H)
     parts = _prune_headwear_junk(parts, args.out, W, H)
 
+    drop = {x.strip() for x in str(getattr(args, "drop_parts", "")).split(",")
+            if x.strip()}
+    # 角色目录下的 drop_extra.json: {"drop": ["ears"]} —— 某些层是垃圾块(和原画对不上),
+    # 拆出来就是一块贴在脸上的色块, 直接丢掉。和 z_order.json 一样放在 parts 的上级目录。
+    _df = os.path.join(os.path.dirname(os.path.abspath(args.out)), "drop_extra.json")
+    if os.path.isfile(_df):
+        try:
+            drop |= {str(x).strip() for x in (json.load(open(_df, encoding="utf-8")).get("drop") or [])}
+        except Exception as _e:          # noqa: BLE001
+            print(f"  drop_extra.json 读取失败: {_e}")
+    if drop:
+        keep, gone = [], []
+        for _p in parts:
+            (gone if _p["name"] in drop else keep).append(_p)
+        for _p in gone:
+            f = os.path.join(args.out, _p["image"])
+            if os.path.isfile(f):
+                os.remove(f)
+        parts = keep
+        print("  丢弃部件: " + (", ".join(p["name"] for p in gone) or "无"))
+
     for _p in parts:                     # 临时标记不要写进 coords
         _p.pop("_z_arm", None)
         _p.pop("_src", None)
@@ -2571,6 +2610,22 @@ def main():
         n = sum(1 for p in parts if p.get("cls") in ("cloth", "headgear"))
         print(f"头饰模式 {wear}: {n} 块" +
               ("头巾(顶部钉死/下摆飘)" if wear == "scarf" else "头盔(刚性跟随头部)"))
+    # 绘制顺序(Spine slot 顺序)覆盖: 角色目录下放 z_order.json 即可
+    #   {"z": {"arm_hand_L": -1}}   —— 负数画在躯干之前(被遮住)
+    # 放在 parts 的上级目录, 拆图只重写 coords.json, 不会把它删掉。
+    _zf = os.path.join(os.path.dirname(os.path.abspath(args.out)), "z_order.json")
+    if os.path.isfile(_zf):
+        try:
+            _spec = json.load(open(_zf, encoding="utf-8"))
+            _by = {q["name"]: q for q in parts}
+            for _n, _z in (_spec.get("z") or {}).items():
+                if _n in _by:
+                    _by[_n]["z"] = float(_z)
+            print("  绘制顺序覆盖: " + ", ".join(
+                f"{k}=z{v:g}" for k, v in (_spec.get("z") or {}).items() if k in _by))
+        except Exception as _e:          # noqa: BLE001
+            print(f"  z_order.json 读取失败: {_e}")
+
     coords_path = os.path.join(args.out, "coords.json")
     with open(coords_path, "w", encoding="utf-8") as f:
         json.dump(coords, f, ensure_ascii=False, indent=2)
@@ -2605,7 +2660,12 @@ def main():
 
     # 清掉上一轮遗留、这张表里已经不用的部件图(比如被判成"白板脸"的 face.png)。
     # 不清的话: 预览/别的工具按目录扫图, 会把废弃的白脸/旧手臂当成部件列出来。
-    _used = {p["image"] for p in parts} | {"coords.json", "headwear_full.png"}
+    _used = {p["image"] for p in parts} | {"coords.json"}
+    # headwear_full.png 只是 fix_headwear 拆头盔/垂布时的"母本"。角色没有头饰部件时
+    # (比如魔神: 头盔把整个头包住了, headwear 被丢掉)它就是纯垃圾, 别留在目录里 ——
+    # 用户会按目录扫图检查, 看到它以为拆图出了残片。
+    if any(q["name"] in ("headwear", "headscarf") for q in parts):
+        _used.add("headwear_full.png")
     for _f in sorted(os.listdir(args.out)):
         if _f.endswith(".png") and _f not in _used:
             try:

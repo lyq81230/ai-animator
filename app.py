@@ -30,6 +30,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 PARTS_SCHEMA = 3        # 与 build_from_seethrough.PARTS_SCHEMA 一致
 OUT_ROOT = os.path.join(HERE, "output")
+# 每次改完代码手动改这个戳。窗口标题会带上它 —— 标题里不是当前版本号,
+# 就说明你现在开着的是改代码之前启动的旧进程(重启才吃得到新逻辑)。
+BUILD_TAG = "2026-11-06 14:40"
 IMG_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 PREVIEW_PNG = "_split_preview.png"
 
@@ -317,7 +320,8 @@ HINT = {
 class Main(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Spine 动作生成器 — 拆图 → 待机 / 行走 / 受击 / 死亡")
+        self.setWindowTitle("Spine 动作生成器 — 拆图 → 待机 / 行走 / 受击 / 死亡"
+                            f"   [{BUILD_TAG}]")
         # 窗口不要写死大小: 1080p 笔记本(算上任务栏/125% 缩放)可用高度常常只有
         # 700 出头, 1180x800 会把底部那排按钮顶到屏幕外。按可用桌面自适应,
         # 上下各留 40px 余量; 左栏本来就带滚动条, 再小也能看全。
@@ -395,7 +399,24 @@ class Main(QMainWindow):
         self.head_wear.currentIndexChanged.connect(self._on_head_wear_changed)
         wear_row.addWidget(self.head_wear, 1)
         sg.addLayout(wear_row, 2, 0, 1, 2)
+
+        # 全参数 / 量化 二选一。勾上=未量化的 layerdiff3d_bf16(画质最好、慢数倍、
+        # 吃 ~14GB 显存); 不勾=nf4 量化版(快、约 8GB)。选择记在 QSettings 里,
+        # 下次启动保持上次的档位。
+        self.cb_full = QCheckBox("全参数模型（画质最好，慢数倍）")
+        self.cb_full.setToolTip(
+            "勾上：AI 分层用未量化的 layerdiff3d_bf16 权重，细节/边缘最准，\n"
+            "　　　但单张图要跑十几分钟，显存约 14GB（不足会自动退回量化版）。\n"
+            "不勾：用 nf4 量化版，一两分钟出结果、约 8GB 显存，绝大多数图够用。\n"
+            "换档位后点【① 重新拆图】才会重跑推理（旧缓存会按档位失效）。")
+        _fv = self.settings.value("full_model", True)
+        if isinstance(_fv, str):
+            _fv = _fv.strip().lower() in ("1", "true", "yes", "on")
+        self.cb_full.setChecked(bool(_fv))
+        self.cb_full.toggled.connect(self._on_full_model_changed)
+        sg.addWidget(self.cb_full, 3, 0, 1, 2)
         left.addWidget(sp)
+
 
         # ---------------- ② 动作 ----------------
         box = QGroupBox("② 动作（拆图后可用，可反复生成）")
@@ -754,6 +775,7 @@ class Main(QMainWindow):
         self.btn_open.setEnabled(ready and not self.busy)
         self.btn_install.setEnabled(not self.busy)
         self.head_wear.setEnabled(not self.busy)
+        self.cb_full.setEnabled(not self.busy)
 
         if not self.drop.path:
             self.split_state.setText("未选素材")
@@ -813,6 +835,18 @@ class Main(QMainWindow):
         self.busy = b
         self._refresh_controls()
 
+    # ------------------------------------------------------------ 全参数 / 量化
+    def _on_full_model_changed(self, on):
+        on = bool(on)
+        self.settings.setValue("full_model", on)
+        txt = ST.model_text(on)
+        self.status.setText("AI 分层: " + txt)
+        self.logbox.appendPlainText(f"\n[模型] 已切到 {txt}")
+        if on and not ST.full_ready():
+            self.logbox.appendPlainText(
+                "全参数权重缺失，本次会按量化版跑。要真用全参数：\n"
+                "  python st_download.py --full    # 约 10GB")
+
     # ------------------------------------------------------------ 有头发 / 无头发
     def _on_head_wear_changed(self, _idx):
         mode = self.head_wear.currentData()
@@ -865,6 +899,17 @@ class Main(QMainWindow):
         self._show_split_preview(True)
 
     # ------------------------------------------------------------ ① 拆图
+    def _write_mode_stamp(self, out_dir, mode, log):
+        """把这次推理用的模型档位记在分层目录里, 供下次判断缓存能否复用。"""
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, ".model_mode"), "w",
+                      encoding="utf-8") as f:
+                f.write(mode + "\n")
+            log(f"档位标记: {mode}")
+        except OSError as ex:      # noqa: BLE001
+            log(f"档位标记写入失败(不影响结果): {ex}")
+
     def _copy_step(self, label, src, dst):
         def fn(log, a=src, b=dst):
             shutil.copyfile(a, b)
@@ -889,7 +934,11 @@ class Main(QMainWindow):
                 self._copy_step("整理坐标 (parts/coords.json)", wc, pc),
             ]
         if ext in IMG_EXT:
-            cmd, env, cwd, out_dir = ST.infer_cmd(src)
+            cmd, env, cwd, out_dir = ST.infer_cmd(
+                src, full=bool(self.cb_full.isChecked()))
+            # 实际生效的档位以命令为准(out_dir 里的权重缺失时会自动退回量化版)
+            mode = ("full" if "--quant_mode" in cmd
+                    and cmd[cmd.index("--quant_mode") + 1] == "none" else "nf4")
             # AI 推理是唯一慢的一步(2-4 分钟)。同一张图重拆时, 只要上次的分层结果
             # 还在且比原图新, 就直接复用它, 只重跑"分层转部件"(改图层白名单后必用)。
             layers = []
@@ -897,13 +946,24 @@ class Main(QMainWindow):
                 layers = [f for f in os.listdir(out_dir)
                           if f.endswith(".png") and not f.endswith("_depth.png")
                           and not f.startswith(("src_", "reconstruction"))]
-            fresh = (len(layers) >= 6
+            # 缓存必须"同一个模型档位"才能复用 —— 否则切到全参数后仍然拿到量化版的
+            # 旧分层, 表现为"勾了全参数没有任何变化"。
+            stamp = os.path.join(out_dir, ".model_mode")
+            prev = ""
+            if os.path.isfile(stamp):
+                try:
+                    prev = open(stamp, encoding="utf-8").read().strip()
+                except OSError:
+                    prev = ""
+            # 老缓存没有档位记录: 量化版是默认档, 直接复用; 要全参数则重跑一次。
+            same_mode = (prev == mode) or (not prev and mode == "nf4")
+            fresh = (len(layers) >= 6 and same_mode
                      and os.path.getmtime(out_dir) >= os.path.getmtime(src) - 2)
             if fresh:
                 steps = [{"type": "py",
                           "label": "复用上次 AI 分层结果 (跳过 GPU 推理)",
-                          "fn": lambda log, d=out_dir, n=len(layers):
-                              log(f"命中缓存: {d}  ({n} 层)\n"
+                          "fn": lambda log, d=out_dir, n=len(layers), m=mode:
+                              log(f"命中缓存: {d}  ({n} 层, {m})\n"
                                   "跳过 2-4 分钟的 AI 拆图, 直接重新组装部件")}]
             else:
                 if not ST.ready():
@@ -912,18 +972,112 @@ class Main(QMainWindow):
                         "平面图需要 AI 拆图组件: " + ST.status_text() +
                         "\n点下面的【安装 AI 拆图组件】按钮先装好再来。")
                     return None
+                if prev and not same_mode:
+                    self.logbox.appendPlainText(
+                        f"模型档位从 {prev} 换成 {mode}，缓存作废，重新跑 GPU 推理")
+                self.logbox.appendPlainText("AI 分层模型: " + ST.model_text(mode == "full"))
+                if mode == "full":
+                    _free = ST.gpu_free_gb()
+                    if _free is not None and _free < ST.FULL_NEED_GB:
+                        self.logbox.appendPlainText(
+                            f"⚠ 当前空闲显存 {_free:.1f}GB，全参数量化前要先塞进 8.14GB 的 "
+                            f"UNet，约需 {ST.FULL_NEED_GB:.0f}GB。\n"
+                            "   显存不够时常报 CUDA error: invalid argument / out of memory，"
+                            "先关掉占显存的程序，或取消勾选改用量化版。")
                 steps = [{"type": "cmd", "label": "AI 自动拆图 (GPU, 约 2-4 分钟)",
-                          "cmd": cmd, "env": env, "cwd": cwd}]
-            steps.append({"type": "cmd", "label": "分层转部件", "cmd": [
+                          "cmd": cmd, "env": env, "cwd": cwd},
+                         {"type": "py", "label": "记录模型档位",
+                          "fn": lambda log, d=out_dir, m=mode:
+                              self._write_mode_stamp(d, m, log)}]
+            _split_cmd = [
                 sys.executable, os.path.join(HERE, "build_from_seethrough.py"),
                 "--src", out_dir, "--out", os.path.join(self.work, "parts"),
                 "--orig-image", src,
-                "--head-wear", str(self.head_wear.currentData())]})
+                "--head-wear", str(self.head_wear.currentData())]
+            # 拆图参数必须和 rebuild_all 一致, 否则"app 里重拆"和"命令行重建"出的
+            # 不是同一套部件(比如魔神/吕布的头要靠 --carve-head 才挖得出来)。
+            try:
+                import rebuild_all as _RB0
+                _cn = os.path.basename(os.path.normpath(self.work))
+                if getattr(_RB0, "DROP_PARTS", ""):
+                    _split_cmd += ["--drop-parts", _RB0.DROP_PARTS]
+                if _cn in getattr(_RB0, "CARVE_HEAD", set()):
+                    _split_cmd.append("--carve-head")
+            except Exception as _e:                     # noqa: BLE001
+                print("拆图参数沿用默认:", _e)
+            steps.append({"type": "cmd", "label": "分层转部件", "cmd": _split_cmd})
             # 腿**不再**在膝高切上下两片(--leg-halves)。切了之后两片在膝部有 8px
             # 重叠, 渲染时两块都画一遍, alpha 叠加出一条比上下都亮的横带 ——
             # 用户:"腿部与躯体相接处一条与上下明显区别的区域"。
             # 整条腿 + 顶点权重渐变(髋->膝->踝)一样能屈膝, 而且没有接缝。
             steps.append(self._copy_step("整理坐标 (coords.json)", pc, wc))
+            # 绘制顺序(和 rebuild_all.DRAW_BEHIND / DRAW_Z 同一份配置)。以前 app
+            # 完全没接这一步: 命令行重建会把 arm_upper_L 压到躯干下面, app 重拆却
+            # 让它盖在胸口上 —— 同一张图两边出来的遮挡关系不一样。
+            try:
+                import rebuild_all as _RBZ
+                _zn = os.path.basename(os.path.normpath(self.work))
+                _sd = os.path.join(HERE, "set_draw_order.py")
+                if _zn in getattr(_RBZ, "DRAW_BEHIND", {}):
+                    steps.append({"type": "cmd", "label": "绘制顺序",
+                                  "cmd": [sys.executable, _sd, self.work,
+                                          "--behind", *_RBZ.DRAW_BEHIND[_zn]]})
+                if _zn in getattr(_RBZ, "DRAW_Z", {}):
+                    steps.append({"type": "cmd", "label": "绘制顺序 (z)",
+                                  "cmd": [sys.executable, _sd, self.work, "--z",
+                                          *[f"{k}={v:g}" for k, v in
+                                            _RBZ.DRAW_Z[_zn].items()]]})
+            except Exception as _e:                     # noqa: BLE001
+                print("绘制顺序跳过:", _e)
+            # 角色专属修补(和 rebuild_all.POST_FIX 同一份配置): 拆图会把一些东西弄坏,
+            # 比如皮甲的盾牌被切进右臂三条里、吕布的头只切出半个脸。放这儿两边都生效。
+            try:
+                import rebuild_all as _RB
+                _cname = os.path.basename(os.path.normpath(self.work))
+                for _sc in _RB.POST_FIX.get(_cname, []):
+                    # 路径/源图统一由 rebuild_all.prepare_args 展开: 配置里的
+                    # output/<名字> 换成本次实际工作目录, 需要的脚本补 --src
+                    # (app 拖入的素材不一定在 E:/pic, 不补就是"找不到源图")。
+                    _bits = _RB.prepare_args(_sc, self.work, self.drop.path or "")
+                    steps.append({"type": "cmd",
+                                  "label": "修补 " + _bits[0].rstrip(".py"),
+                                  "cmd": [sys.executable,
+                                          os.path.join(HERE, _bits[0])] + _bits[1:]})
+            except Exception as _e:                     # noqa: BLE001
+                print("POST_FIX 跳过:", _e)
+            # POST_FIX 会改部件尺寸(coords 跟着变), 而下面 COMMON_POST 那几个脚本
+            # 一律读 <work>/coords.json。不同步的话它们拿着旧尺寸去切新 PNG ->
+            # ValueError: could not broadcast ... (僵尸扇子男的 bleed 就是这么炸的,
+            # 界面上表现为"拆图失败")。所以这里必须再同步一次。
+            if os.path.isfile(pc):
+                steps.append(self._copy_step("同步坐标 (POST_FIX 后)", pc, wc))
+            # 通用后处理: 清残片 + 出血。和 rebuild_all.COMMON_POST 是同一份清单,
+            # 否则"app 里重拆"和"命令行重建"出的不是同一套部件。
+            try:
+                import rebuild_all as _RBP
+                for _sc, _a in getattr(_RBP, "COMMON_POST", []):
+                    steps.append({"type": "cmd", "label": _sc.rstrip(".py"),
+                                  "cmd": [sys.executable, os.path.join(HERE, _sc),
+                                          os.path.join(self.work)] + list(_a)})
+            except Exception as _e:                     # noqa: BLE001
+                print("COMMON_POST 跳过:", _e)
+            # COMMON_POST 之后才能做的精确抠形(出血会糊回邻居颜色)。
+            # 以前这里是**当场 subprocess.run**, 也就是在"用户点拆图之前"就跑完了 ——
+            # 处理的是上一次的旧部件, 然后被这次拆图覆盖, 等于永远不生效。
+            # 现在挂成正式步骤, 排在 COMMON_POST 之后。
+            try:
+                import rebuild_all as _RBL
+                for _sc in getattr(_RBL, "POST_FIX_LATE", {}).get(_cname, []):
+                    _bits = _RBL.prepare_args(_sc, self.work, self.drop.path or "")
+                    steps.append({"type": "cmd",
+                                  "label": "精修 " + _bits[0].rstrip(".py"),
+                                  "cmd": [sys.executable,
+                                          os.path.join(HERE, _bits[0])] + _bits[1:]})
+            except Exception as _e:                     # noqa: BLE001
+                print("POST_FIX_LATE 跳过:", _e)
+            # 最后再同步一次, 界面读的是 <work>/coords.json
+            if os.path.isfile(pc):
+                steps.append(self._copy_step("整理坐标 (coords.json)", pc, wc))
             return steps
         self.status.setText("不支持的文件类型")
         return None
@@ -1000,6 +1154,12 @@ class Main(QMainWindow):
                  " 动画（合并导出一个 Spine 骨架）" if len(keys) > 1
                  else f"生成骨骼 + {ACTION_LABEL[self.action]} 动画")
         steps = [{"type": "cmd", "label": label, "cmd": self._gen_cmd()}]
+        # 再导一套 Spine 4.0 格式的包(<名字>_v4)。LoongBones 的 3.8 导入通道是坏的
+        # (官方 spineboy 3.8 导进去也是一堆散落部件), 4.0 通道正常; 而 4.0 把旋转
+        # 关键帧的 angle 改名成 value, 所以必须做字段转换, 不能只改版本号。
+        steps.append({"type": "cmd", "label": "导出 LoongBones 包",
+                      "cmd": [sys.executable, os.path.join(HERE, "to_spine40.py"),
+                              self.work, "auto"]})
         self.mode = "action"
         self._set_busy(True)
         self.worker = Worker(steps)
@@ -1106,11 +1266,17 @@ class Main(QMainWindow):
                     f"  ({'、'.join(keys)})" +
                     "\nSpine: " + os.path.join(self.work, "spine") +
                     f"  ← 一个骨架 + {len(keys)} 条动作 (png+atlas+json)" +
+                    "\nLoongBones 导入: " + os.path.join(self.work, "spine",
+                                                         os.path.basename(self.work) + "_loong_<指纹>") +
+                    "  ← 三件套一起拖进去" +
                     "\n拆图可复用，改勾选直接再点生成即可。")
             else:
                 self.logbox.appendPlainText(
                     "\n输出: " + os.path.join(self.work, self.action, "result.json") +
                     "\nSpine: " + os.path.join(self.work, "spine") +
+                    "\nLoongBones 导入: " + os.path.join(self.work, "spine",
+                                                         os.path.basename(self.work) + "_loong_<指纹>") +
+                    "  ← 三件套一起拖进去" +
                     "\n拆图可复用，换个动作直接再点生成即可。")
 
     def open_out(self):

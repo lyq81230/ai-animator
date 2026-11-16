@@ -249,7 +249,15 @@ def punch_head_wear(parts, img_dir, cw, ch):
         mask[y0:y1, x0:x1] |= sim[:y1 - y0, :x1 - x0, 3] > 12
     if not mask.any():
         return
-
+    # 不要挖到边: 网格的边界顶点是贴着不透明区、还要往里缩 1px 的, 挖到边就会在
+    # 脸/头巾那条交界上露出一串 1px 透明虚线(编辑器/渲染里看着就是白边)。头饰和
+    # 头部各层同骨刚性运动, 留 2px 垫边完全看不出来, 却能把缝焊死。
+    from PIL import ImageFilter
+    _m = Image.fromarray((mask.astype(np.uint8) * 255))
+    _m = _m.filter(ImageFilter.MinFilter(int(os.environ.get('PUNCH_ERODE','5'))))
+    mask = np.array(_m) > 127
+    if not mask.any():
+        return
     total = 0
     for t in targets:
         fp = os.path.join(img_dir, t["image"])
@@ -480,28 +488,65 @@ def load_parts(coords, parts_dir, img_dir, ch, square_mesh=False):
                 print(f"  鞋自动拆分: footwear -> L/R (各绑 leg_?_foot)")
                 continue
 
-        # 形状自适应网格: 用 PNG 内 bbox 区 alpha 沿轮廓布点, 透明角不被拉伸;
-        # 失败(无 cv2/scipy 或形状异常)回退正方形规则网格。
+        cls = p.get("cls") or classify(name, is_bird)
+        if is_bird:
+            cls = "bird"
+        # 道具(武器/盾/斧)整块 100% 绑在一根 prop 骨上, 根本不需要形变网格。
+        # 形状网格会在细长部分丢三角形 —— 吕布的斧柄中段就整段不见了(三角形质心落到
+        # 透明区被剔掉)。直接给包围盒四边形: 4 个顶点、uv 0~1, 像素与原图逐点一致,
+        # 透明的地方由贴图 alpha 自己处理。
         shape = None
-        if not square_mesh and sub_box is not None:
-            a_full = np.asarray(im.convert("RGBA"))[:, :, 3]
-            l_, t_, r_, b_ = sub_box
-            sub = a_full[max(0, t_):max(1, b_), max(0, l_):max(1, r_)]
-            if sub.size:
-                shape = build_shape_mesh(x, y, w, h, gx, gy, sub)
-        if shape is not None:
-            verts, uvs, tris, hull, edges = shape
+        # 四肢要"网格形变", 网格太稀就退化成整块刚体旋转(看着像纯图片动画)。
+        # coords 里的 grid 大多是 2x2, 对 40px 的胳膊就是 20px 一个格子 —— 加密到
+        # 大约 6px 一格, 肘/腕才有足够的顶点做权重过渡。
+        _DENSE = {"arm_upper", "arm_fore", "arm_hand", "leg", "leg_up", "leg_low", "foot"}
+        if str(cls) in _DENSE and not square_mesh:
+            gx = int(min(14, max(gx, round(w / 6.0))))
+            gy = int(min(14, max(gy, round(h / 6.0))))
+        # 躯干也要够密: 默认 grid 3x3 对 150px 的胸甲就是 50px 一个顶点, 肩关节
+        # 附近根本没有顶点, 想让它跟手臂联动也"抓不到人"。加密到约 12px。
+        # 大面积的躯干类部件都要加密: wings(224x250) 原来按 coords 的 4x4 出网格,
+        # 一格 60px, 肩侧那道凹口整个落在三角形外面 —— 部件图有像素、动画里是空洞。
+        # 判据从"白名单名字"改成"名字 或 面积", 以后别的角色的披风/翅膀也能覆盖到。
+        if (str(cls) == "body" and not square_mesh
+                and (str(name) in ("topwear", "body", "dress", "coat")
+                     or float(w) * float(h) >= 12000)):
+            # 9px 一档: 魔神中间那条 13px 宽的垂片, 12px 采样会被轮廓切掉
+            gx = int(min(20, max(gx, round(w / 9.0))))
+            gy = int(min(20, max(gy, round(h / 9.0))))
+        # 布类/头饰大件(headwear_overlay 这类头巾垂布)也是 6x6 的粗网格起步,
+        # 219x208 的窗口一格 36px —— 垂下来的那条窄尾巴整段落不进三角形里,
+        # 部件图有像素、渲染出来却是透明的一条虚线(用户看到的"白边")。按面积加密。
+        if (str(cls) in ("cloth", "headgear", "hair") and not square_mesh
+                and float(w) * float(h) >= 8000):
+            gx = int(min(18, max(gx, round(w / 10.0))))
+            gy = int(min(18, max(gy, round(h / 10.0))))
+        if cls == "prop" and not square_mesh:
+            verts, uvs, tris, hull, edges = build_grid_mesh(x, y, w, h, 1, 1)
         else:
-            verts, uvs, tris, hull, edges = build_grid_mesh(x, y, w, h, gx, gy)
+            # 形状自适应网格: 用 PNG 内 bbox 区 alpha 沿轮廓布点, 透明角不被拉伸;
+            # 失败(无 cv2/scipy 或形状异常)回退正方形规则网格。
+            # 头巾/披风这类"大块布 + 细长垂尾"例外: 形状网格按三角形质心剔除,
+            # 凹进去的垂尾整块会被判成背景 -> 部件有像素、渲染却是透明洞(白边)。
+            # 这类部件直接用规则网格盖满包围盒, 透明处交给贴图 alpha。
+            _bigcloth = (str(cls) in ("cloth", "headgear")
+                         and float(w) * float(h) >= 8000)
+            if not square_mesh and sub_box is not None and not _bigcloth:
+                a_full = np.asarray(im.convert("RGBA"))[:, :, 3]
+                l_, t_, r_, b_ = sub_box
+                sub = a_full[max(0, t_):max(1, b_), max(0, l_):max(1, r_)]
+                if sub.size:
+                    shape = build_shape_mesh(x, y, w, h, gx, gy, sub)
+            if shape is not None:
+                verts, uvs, tris, hull, edges = shape
+            else:
+                verts, uvs, tris, hull, edges = build_grid_mesh(x, y, w, h, gx, gy)
         if uv_box is not None:
             u0, v0u, u1, v1u = uv_box
             for k in range(0, len(uvs), 2):
                 uvs[k] = u0 + uvs[k] * (u1 - u0)
                 uvs[k + 1] = v0u + uvs[k + 1] * (v1u - v0u)
 
-        cls = p.get("cls") or classify(name, is_bird)
-        if is_bird:
-            cls = "bird"
         shutil.copy(sp, os.path.join(img_dir, png))
 
         v_vid = np.array(verts, float)                 # 视频像素(y下)
@@ -512,6 +557,7 @@ def load_parts(coords, parts_dir, img_dir, ch, square_mesh=False):
             v_vid=v_vid, v_spine=v_spine, cls=cls, bird=is_bird,
             follow=p.get("follow_part"),
             bind_bone=p.get("bind_bone"),
+            z=float(p.get("z", 0) or 0),          # 绘制顺序覆盖(见 build_spine_json)
             iw=iw, ih=ih,
             x0=float(v_vid[:, 0].min()), x1=float(v_vid[:, 0].max()),
             y0=float(v_vid[:, 1].min()), y1=float(v_vid[:, 1].max()),
@@ -525,6 +571,28 @@ def load_parts(coords, parts_dir, img_dir, ch, square_mesh=False):
 # ----------------------------------------------------------------------------
 # 手标骨链加载 (bones.json, 像素坐标 -> spine 世界坐标)
 # ----------------------------------------------------------------------------
+def load_rigid(coords_path):
+    """读 rig.json: {"rigid": {"部件名": "骨骼名"}} —— 强制某片 100% 绑一根骨。
+
+    用在"全甲包头"的角色上: 头盔底下那块头巾是塞进去的, 不该随风飘 ——
+    但按 cls=cloth 生成会给它挂风吹骨链, 一动整块布在头盔边上抖。
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(coords_path)), "rig.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        d = json.load(open(path, encoding="utf-8"))
+    except Exception:                                  # noqa: BLE001
+        return {}
+    out = {}
+    for k, v in (d.get("rigid") or {}).items():
+        if v:
+            out[str(k)] = str(v)
+    if out:
+        print(f"  rig.json: {len(out)} 片强制刚性 -> {out}")
+    return out
+
+
 def load_bone_markers(bones_json, coords_path, ch):
     """读手标骨链。格式见 IDLE_ALGORITHM.md 8.7。
     返回 dict: {'arm':{'L':[pts],'R':[pts]}, 'hair':[[pts],...],
@@ -600,9 +668,16 @@ def build_skeleton(parts, cw, ch, args):
     lashes = grp("lash")
     blink_eyes = grp("blink_eye")      # 闭眼图层(有则切换, 无则挤压)
     closed_eyes = grp("eye_closed")    # 合成出来的闭眼补丁(倒地/昏迷时盖住眼睛)
-    hairs = grp("hair")
-    ribbons = grp("ribbon")
-    cloths = grp("cloth")          # 头巾/披巾: 一头钉在头上, 垂下的部分会飘
+    _rigid = getattr(args, "_rigid", {}) or {}
+
+    def _not_rigid(lst):
+        return [q for q in lst if q["name"] not in _rigid]
+
+    hairs = _not_rigid(grp("hair"))
+    ribbons = _not_rigid(grp("ribbon"))
+    # 头巾/披巾: 一头钉在头上, 垂下的部分会飘; rig.json 里点名的(全甲包头的头巾)
+    # 不进风链, 由 assign_weights 100% 绑头部骨 —— 塞在头盔里的布不该抖。
+    cloths = _not_rigid(grp("cloth"))
     arms_up = grp("arm_upper")
     arms_fore = grp("arm_fore")
     arms_hand = grp("arm_hand")
@@ -823,19 +898,26 @@ def build_skeleton(parts, cw, ch, args):
     arm_chains = []
 
     def arm_side(side_up, side_fore, side_hand, label):
-        seq = []                                       # 有序 (part, joint_name)
-        for fp in side_up[:1]:
-            seq.append((fp, f"arm_{label}_up"))
-        for fp in side_fore[:1]:
-            seq.append((fp, f"arm_{label}_fore"))
-        for fp in side_hand[:1]:
-            seq.append((fp, f"arm_{label}_hand"))
+        # 每一节可能包含【多个部件】(肩甲/大臂/护腕/拳头会被拆成好几片), 以前只取
+        # 列表里的第一个 [:1] —— 魔神左臂的列表第一个是个 8x7 的小碎块, 于是
+        # 8x7 碎块成了"大臂"(骨放在肘上), 真正的 arm_upper_L(50x98) 根本没进链,
+        # 最后按"找不到骨 -> 绑躯干"处理: 走路时右臂摆、左臂整块钉死。
+        # 现在每节取【主件】(顶点最多)算关节位置, 该节所有部件都绑到同一根骨。
+        seq = []                                       # [(该节所有部件, 骨名, 主件)]
+        for lst, jname in ((side_up, f"arm_{label}_up"),
+                           (side_fore, f"arm_{label}_fore"),
+                           (side_hand, f"arm_{label}_hand")):
+            lst = [q for q in lst if q is not None]
+            if not lst:
+                continue
+            rep = max(lst, key=lambda q: (len(q["v_spine"]), part_size(q)))
+            seq.append((lst, jname, rep))
         if not seq:
             return
         chain = []
         prev = torso
         prev_v = None          # 上一部件顶点
-        for (fp, jname) in seq:
+        for (lst, jname, fp) in seq:
             v = fp["v_spine"]
             if prev_v is None:
                 # 肩点 = 部件【上沿 28%】里最靠身体中线的那一点。
@@ -853,6 +935,10 @@ def build_skeleton(parts, cw, ch, args):
                 joint = _closest_pair_joint(prev_v, v)
             b = sk.add(jname, prev, float(joint[0]), float(joint[1]))
             chain.append((fp, b))
+            # 同一节的其余部件跟在主件后面绑同一根骨(碎块也跟着动, 不再掉到躯干上)
+            for extra in lst:
+                if extra is not fp:
+                    chain.append((extra, b))
             prev = b
             prev_v = v
         arm_chains.append((label, chain))
@@ -921,10 +1007,23 @@ def build_skeleton(parts, cw, ch, args):
             hit = next((bd for (pp, bd) in chain if pp["name"] == target), None)
             if hit is None:
                 continue
-            grip = sk.get(f"arm_{label}_hand") or hit     # 握点: 优先挂在手骨处
-            pb = sk.add(f"prop_{p['name']}", hit, grip.wx, grip.wy)
+            # 握点/父骨: 有手骨就挂手骨(武器绕腕转); 没有手骨就用"武器与这条手臂
+            # 最近的一对点"当握把 —— 之前固定用 hit 的骨原点(=肩/肘), 刀就绕肩膀转,
+            # 尖端甩得最远, 看着像"刀尖没跟手"。
+            hand = sk.get(f"arm_{label}_hand")
+            if hand is not None:
+                parent, gx, gy = hand, hand.wx, hand.wy
+            else:
+                tp = next((pp for (pp, bd) in chain if bd is hit), None)
+                if tp is not None:
+                    gx, gy = _closest_pair_joint(tp["v_spine"], p["v_spine"])
+                else:
+                    gx, gy = hit.wx, hit.wy
+                parent = hit
+            pb = sk.add(f"prop_{p['name']}", parent, float(gx), float(gy))
             chain.append((p, pb))       # 权重按 setup 世界坐标算, 位置不变形
-            print(f"  道具 {p['name']} 跟随 {target}（独立骨, 挂在 {grip.name} 处, 不随手臂缩放）")
+            print(f"  道具 {p['name']} 跟随 {target}（独立骨, 父骨 {parent.name}, "
+                  f"握点 ({gx:.0f},{gy:.0f})）")
             break
         else:
             print(f"  道具 {p['name']}: 找不到 {target}, 保持贴躯干")
@@ -976,8 +1075,12 @@ def build_skeleton(parts, cw, ch, args):
 
     eye_closed_bone = (feat_bones.get(closed_eyes[0]["name"])
                        if closed_eyes else None)
-    # 不写骨骼的 setup 缩放: 回到"闭眼补丁"最初的行为(补丁只在动画里被缩放),
-    # 加了 setup=0.001 会让某些编辑器/预览在未播动画时看不到补丁。
+    if eye_closed_bone is not None:
+        # 绑定姿态就缩到看不见。闭眼补丁是"每帧一张眼睛的贴图", slot 的 setup
+        # attachment 又挂着它 —— 不写 scaleX/scaleY 的话, 不播动画时(Spine 编辑器
+        # 的 setup pose、引擎里刚创建节点)角色就是闭着眼的。动画里 0.001->1.0
+        # 的 scale 轨道照旧负责眨眼。
+        eye_closed_bone.sx = eye_closed_bone.sy = 0.001
 
     info = dict(
         torso=torso, neck=neck, head=head, feat_bones=feat_bones,
@@ -1007,6 +1110,7 @@ def assign_weights(parts, sk, info, args):
     head_botY, head_h = info["head_botY"], info["head_h"]
     root = sk.root
     lock_h = max(1.0, args.foot_lock * (by1 - by0))   # 自底向上锁定过渡带
+    _rigid = getattr(args, "_rigid", {}) or {}        # rig.json 强制刚性片
 
     for p in parts:
         v = p["v_spine"]
@@ -1019,6 +1123,14 @@ def assign_weights(parts, sk, info, args):
             continue
         # coords 里显式指定绑定骨(如切开的大腿/小腿): 100% 单骨, 不做权重渐变。
         # 这样刚性蒙皮的编辑器也能靠"两片分别跟髋/膝"实现屈膝。
+        _rg = _rigid.get(p["name"])
+        if _rg:
+            _b = sk.get(_rg)
+            if _b is not None:
+                for _ in v:
+                    bw.append([(_b, 1.0)])
+                p["bone_weights"] = bw
+                continue
         _bb = p.get("bind_bone")
         if _bb:
             _b = sk.get(_bb)
@@ -1114,28 +1226,47 @@ def assign_weights(parts, sk, info, args):
                 else:
                     bw.append([(fb, 1.0)])
         elif cls == "cloth":
-            # 头巾: 权重按【离头部多远】分, 不按高度分。
-            # 包在头上那圈(离头近)必须 100% 跟头 —— 按高度分会把下半圈算进"会飘"的
-            # 骨, 一转就把贴着头的那圈布带走, 看着像脸在动。
+            # 头巾: 只有【垂出去】的部分才飘, 包头的那一圈(含头顶)一律刚性。
+            #
+            # 判"哪块会飘"用【到头部轮廓的距离】, 但只算两个方向:
+            #   横向离开头的左右边界、纵向低于下巴线。
+            # 高出头顶的像素**不算远离** —— 头巾本来就比脸高一截(fashu 高 0.7 个
+            # 脸长), 把上方算成距离等于让整片头顶跟着风摆。用户:"头顶部的头巾应该不能飘动"。
+            # 侧垂布条同理: 根部贴着头的侧面(距离小)仍然刚性, 只有垂出去的那截才飘,
+            # 这样布条不会从根上被吹走、和头巾主体之间拉开一道缝。
             chain = None
             for (pp, bones, tag) in info["wind_chains"]:
                 if pp is p:
                     chain = bones
                     break
             chain = chain or []
-            hx0 = info["head_cx"] - info["head_half"]
-            hx1 = info["head_cx"] + info["head_half"]
-            hy0, hy1 = info["head_botY"], info["head_topY"]
-            m0 = 0.16 * info["head_h"]          # 这个距离以内 = 贴着头, 完全不动
-            m1 = 0.78 * info["head_h"]          # 这个距离以外 = 完全交给摆动的骨
+            _hh = max(1.0, info["head_h"])
+            _hw = max(1.0, info["head_half"])
+            _m0 = 0.28 * _hh            # 这个距离以内 = 还包在头上/布条根部, 完全不动
+            _m1 = 0.72 * _hh            # 这个距离以外 = 完全交给摆动的骨
             nseg = len(chain)
+            # 贴着头的那圈钉在**头部骨**上, 而不是链首的发骨。
+            # 链首骨自己也带风吹旋转(只是比发梢小), 绑它的话"包头"部分照样会晃 ——
+            # 实测皮甲的头巾整块都在动, 用户: "包头部分应是刚性的, 仅延伸出去的部分可飘动"。
+            hb = info.get("feat_bones", {}).get("head") or head
             for (sx, sy) in v:
-                dx = max(hx0 - sx, 0.0, sx - hx1)
-                dy = max(hy0 - sy, 0.0, sy - hy1)
-                d = math.hypot(dx, dy)
-                t = smoothstep(np.clip((d - m0) / max(1e-3, m1 - m0), 0.0, 1.0))
-                if nseg < 2 or t <= EPS:
-                    bw.append([((chain[0] if chain else head), 1.0)])
+                # 只算"横向离开头轮廓"和"低于下巴"两个方向的距离, **不算高出头顶**:
+                # 头巾本来就比脸高(这角色高 0.7 个脸长), 把上方算成"远离"等于让
+                # 头顶整片都被风摆。头顶再怎么高也还是包在头上的。
+                _dh = max(0.0, abs(sx - info["head_cx"]) - _hw)
+                _dv = max(0.0, info["head_botY"] - sy)
+                d = math.hypot(_dh, _dv)
+                t = smoothstep(np.clip((d - _m0) / max(1e-3, _m1 - _m0), 0.0, 1.0))
+                # 头顶线以上一律零权重: 侧垂布条的起点也在头顶右侧, 只按距离算
+                # 它会带着头顶那一角一起摆。10px 过渡带防止在头顶线上折出硬棱。
+                t *= smoothstep(np.clip(
+                    (info["head_topY"] - sy) / (0.12 * _hh), 0.0, 1.0))
+                if nseg < 2:
+                    # 只有一段布: 头内部分刚性跟头, 外面仍跟这根骨(它会有摆动)
+                    bw.append([(hb if t <= EPS else chain[0], 1.0)])
+                    continue
+                if t <= EPS:
+                    bw.append([(hb, 1.0)])
                     continue
                 # 沿整条链平滑分布(以前只有首/末两根骨): 只给首末两骨时,
                 # 中间那段布要么完全钉死要么整块跟着末骨甩, 看着像"整条头巾在晃"。
@@ -1144,9 +1275,18 @@ def assign_weights(parts, sk, info, args):
                 i1 = min(i0 + 1, nseg - 1)
                 f = fpos - i0
                 if i0 == i1 or f <= EPS:
-                    bw.append([(chain[i0], 1.0)])
+                    w_chain = [(chain[i0], 1.0)]
+                elif f >= 1 - EPS:
+                    w_chain = [(chain[i1], 1.0)]
                 else:
-                    bw.append([(chain[i0], 1 - f), (chain[i1], f)])
+                    w_chain = [(chain[i0], 1 - f), (chain[i1], f)]
+                # 刚离开头的那一小段(过渡带)还要留一部分头部骨权重, 否则贴头与飘动
+                # 之间会出现一条硬折线, 一动就看出"两块布拼的"。
+                k = smoothstep(np.clip((t - 0.08) / 0.30, 0.0, 1.0))
+                if k >= 1 - EPS:
+                    bw.append(w_chain)
+                else:
+                    bw.append([(hb, 1 - k)] + [(b, w * k) for (b, w) in w_chain])
         elif cls in ("hair", "ribbon"):
             chain = None
             for (pp, bones, tag) in info["wind_chains"]:
@@ -1176,16 +1316,39 @@ def assign_weights(parts, sk, info, args):
                 else:
                     bw.append([(chain[i0], 1 - frac), (chain[i0 + 1], frac)])
         elif cls in ("arm_upper", "arm_fore", "arm_hand", "prop"):
-            # 手臂: 各段绑各自骨(纯 FK 旋转, 不动骨位移)。衔接靠子骨枢轴
-            # 落在与上级部件的交界处(见 build_skeleton arm_side)。
-            # prop(武器/盾): 已挂进同一条手臂链, 100% 跟随那只手/小臂的骨。
+            # 手臂/手原来每段 100% 绑自己那根骨 —— 那就是"纯图片"的行为(整块硬移)。
+            # 现在按"离关节两侧骨的远近"做平滑蒙皮: 肘/腕会真的弯, 相邻两片在
+            # 接缝处权重连续所以不会裂开。武器/盾(prop)仍 100% 跟手, 免得被拉变形。
             b, prev_b, next_b = _find_arm_bone(p, info)
-            tb = b if b else torso
-            for _ in v:
-                bw.append([(tb, 1.0)])
+            if cls == "prop" or b is None:
+                tb = b if b else torso
+                for _v in v:
+                    bw.append([(tb, 1.0)])
+            else:
+                cand = [x for x in (prev_b, b, next_b) if x is not None]
+                # 只有"不是第一节"的部件才焊: prev_b 是手臂链里的上一节(肘/腕的父骨)。
+                # 第一节(大臂)的 prev 是躯干, 焊上去会把手钉死在肩上, 不动。
+                _weld = None
+                if prev_b is not None and getattr(prev_b, "name", "") not in ("torso", "root"):
+                    _weld = prev_b
+                w_arr = _soft_skin(v, cand, own=b, weld=_weld)
+                # 注意方向: 只让【躯干】去跟手臂, 不能反过来让手臂跟躯干 ——
+                # 手臂靠近肩的顶点如果被拉向躯干, 抬手时手臂根部不动、躯干也不动,
+                # 接缝反而更容易张开。真正的"联动"是躯干那块皮肉被手臂带走。
+                p["bone_weights"] = w_arr
+                continue
         else:
             for _ in v:
                 bw.append([(torso, 1.0)])
+
+        # 躯干贴着手臂关节的那一圈: 分一部分权重给大臂骨 —— 和"大臂靠近肩关节的
+        # 那一圈分给躯干"是同一条公式(同 R 同 t), 所以接缝两侧权重连续。
+        # 效果: 手臂抬起时, 肩膀那块躯干皮肉跟着一起拉, 不会在肩口撕开。
+        if cls == "body" and info.get("arm_chains"):
+            for _lab, _chain in info["arm_chains"]:
+                if _chain:
+                    _b0 = _chain[0][1]
+                    bw = _blend_to(bw, v, _b0, _b0, 0.85, host=torso)
         p["bone_weights"] = bw
 
 
@@ -1207,10 +1370,158 @@ def _find_arm_bone(p, info):
     for (label, chain) in info["arm_chains"]:
         for k, (pp, b) in enumerate(chain):
             if pp is p:
-                prev_b = chain[k - 1][1] if k > 0 else None
-                next_b = chain[k + 1][1] if k + 1 < len(chain) else None
+                # 同一节可能挂了多个部件(肩甲+大臂), 相邻项常常是同一根骨 ——
+                # 取"不同的骨"当上一节/下一节, 否则会把自己当成邻居。
+                prev_b = None
+                for j in range(k - 1, -1, -1):
+                    if chain[j][1] is not b:
+                        prev_b = chain[j][1]
+                        break
+                next_b = None
+                for j in range(k + 1, len(chain)):
+                    if chain[j][1] is not b:
+                        next_b = chain[j][1]
+                        break
                 return b, prev_b, next_b
     return None, None, None
+
+
+def _bone_seg(b):
+    """骨的线段(世界坐标): 本骨原点 -> 子骨原点; 叶骨沿父->本方向延长一倍。"""
+    if b.children:
+        c = b.children[0]
+        return (b.wx, b.wy, c.wx, c.wy)
+    if b.parent is not None:
+        dx, dy = b.wx - b.parent.wx, b.wy - b.parent.wy
+        return (b.wx, b.wy, b.wx + dx, b.wy + dy)
+    return (b.wx, b.wy, b.wx, b.wy)
+
+
+def _pt_seg_dist(px, py, x0, y0, x1, y1):
+    dx, dy = x1 - x0, y1 - y0
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-9:
+        return math.hypot(px - x0, py - y0)
+    t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / L2))
+    return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
+
+
+def _blend_to(weights, vertices, joint_bone, target_bone, strength=0.8, host=None):
+    """把关节附近顶点的权重按比例分给 target_bone。
+
+    joint_bone 的原点就是关节位置; 距离 d 处 t = strength*exp(-(d/R)^2), R 取
+    0.35 倍骨长(夹在 8~16px)。靠近关节 -> t 接近 strength, 远处约为 0。
+    接缝两侧的两块部件对同一位置算出同一个 t, 所以权重连续、动起来不裂。
+
+    host 不为 None 时, 只处理"当前主要绑在 host 上"的顶点(躯干那边用)。
+    """
+    if joint_bone is None or target_bone is None:
+        return weights
+    strength = float(os.environ.get("ARM_TORSO_LINK", strength))  # 调试用: 0 关掉联动
+    x0, y0, x1, y1 = _bone_seg(joint_bone)
+    L = max(8.0, math.hypot(x1 - x0, y1 - y0))
+    R = min(32.0, max(12.0, 0.65 * L))
+    out = []
+    for (pairs, (sx, sy)) in zip(weights, vertices):
+        d = math.hypot(sx - x0, sy - y0)
+        t = strength * math.exp(-(d / R) ** 2)
+        if t < 0.04:
+            out.append(pairs)
+            continue
+        if host is not None:
+            share = sum(w for (b, w) in pairs if b is host)
+            if share < 0.35:          # 主要不是挂在躯干上的顶点跳过
+                out.append(pairs)
+                continue
+        # 贴到关节的极近处直接 100% 给对面那根骨: 这样"两边贴图相接的那个口"
+        # 完全跟着同一根骨走, 无论怎么转都不会错位(用户: "两个骨骼的贴图只有一个
+        # 连接部位, 应该可以联动")。稍远处才做比例过渡。
+        if t >= 0.60:
+            out.append([(target_bone, 1.0)])
+            continue
+        pairs = [(b, w * (1.0 - t)) for (b, w) in pairs]
+        pairs.append((target_bone, t))
+        acc = {}
+        for (b, w) in pairs:
+            acc[b] = acc.get(b, 0.0) + w
+        pairs = sorted(acc.items(), key=lambda kv: -kv[1])
+        ssum = sum(w for _b, w in pairs) or 1.0
+        out.append([(b, w / ssum) for (b, w) in pairs])
+    return out
+
+
+def _soft_skin(vertices, bones, own=None, own_bias=6.0, weld=None):
+    """按"离骨越近权重越大"给关节做平滑蒙皮。
+
+    bones: [骨, ...] —— 关节两侧的骨。同一段身体的相邻部件用同一套规则,
+    接缝两侧顶点的权重是连续的, 所以肘/腕弯起来不会裂开。
+    返回 [[(骨,w), ...], ...]; 明显单侧占优(>93%)时退化成 100% 单骨(刚体段)。
+    """
+    segs = [(b, _bone_seg(b)) for b in bones]
+    out = []
+    for (sx, sy) in vertices:
+        ds = [_pt_seg_dist(sx, sy, *seg) for (_b, seg) in segs]
+        ws = []
+        for i, (b, (x0, y0, x1, y1)) in enumerate(segs):
+            d = ds[i]
+            L = max(8.0, math.hypot(x1 - x0, y1 - y0))
+            # 自己的骨用更宽的影响半径: 骨的原点常常落在部件的边角(比如手腕),
+            # 部件主体离它二三十像素, 半径太小时整块都会被邻骨吃掉。
+            own_here = own is not None and b is own
+            tau = (0.50 if own_here else 0.20) * L
+            w = math.exp(-d / tau)
+            # 本部件自己的骨给一个偏好: 只按距离算时, 手(离腕骨远、离小臂骨近)
+            # 会被算成 93% 小臂 —— 手就不再跟手骨转了。加偏好后自己那根骨主导,
+            # 只有贴着关节的顶点才会分到邻骨权重。
+            # 但偏好要按"离关节多远"衰减: 常数偏好会让接缝两侧一边 86% 一边 14%,
+            # 弯起来就是两片图片错开(用户: "纯图片动画")。贴到别的骨上时偏好降到 1,
+            # 关节处两边自动 50/50, 皮肤是连续过渡的。
+            if own_here:
+                others = [ds[j] for j in range(len(ds)) if j != i]
+                d_other = min(others) if others else 1e9
+                f = math.exp(-d_other / (0.5 * tau))      # 1=就贴在别的骨上
+                w *= 1.0 + (own_bias - 1.0) * (1.0 - f)
+            ws.append(w)
+        tot = sum(ws) or 1.0
+        pairs = [(segs[i][0], ws[i] / tot) for i in range(len(ws))]
+        pairs.sort(key=lambda t: -t[1])
+        pairs = [(b, w) for (b, w) in pairs if w >= 0.08]
+        s = sum(w for _b, w in pairs) or 1.0
+        pairs = [(b, w / s) for (b, w) in pairs]
+        if len(pairs) == 1 or pairs[0][1] >= 0.93:
+            pairs = [(pairs[0][0], 1.0)]
+        # 关节"焊死": 部件靠关节那一圈顶点直接跟【父骨】100%。
+        # 两片图的接缝两侧于是都跟着父骨走 -> 弯起来不会张口子;
+        # 弯曲改由网格内部拉伸表达(这才是网格动画该有的样子)。
+        if weld is not None and own is not None:
+            _ox, _oy, _ex, _ey = _bone_seg(own)
+            _L = max(8.0, math.hypot(_ex - _ox, _ey - _oy))
+            _R = min(14.0, max(6.0, 0.30 * _L))
+            _d = math.hypot(sx - _ox, sy - _oy)          # 到关节(本骨原点)的距离
+            _t = math.exp(-(_d / _R) ** 2)               # 1=就在关节上
+            if _t > 0.5:
+                pairs = [(weld, 1.0)]
+            elif _t > 0.02:
+                pairs = [(b, w * (1.0 - _t)) for (b, w) in pairs]
+                pairs.append((weld, _t))
+                _s = sum(w for _b, w in pairs) or 1.0
+                pairs = [(b, w / _s) for (b, w) in pairs if w / _s >= 0.06]
+                _s = sum(w for _b, w in pairs) or 1.0
+                pairs = [(b, w / _s) for (b, w) in pairs]
+        # 同一个骨可能被算进两次(比如焊的父骨本来就在候选里) —— 合并, 免得写出
+        # [fore, up, up] 这种重复项
+        if len(pairs) > 1:
+            _acc = {}
+            for (b, w) in pairs:
+                _acc[b] = _acc.get(b, 0.0) + w
+            pairs = sorted(_acc.items(), key=lambda t: -t[1])
+            _s = sum(w for _b, w in pairs) or 1.0
+            pairs = [(b, w / _s) for (b, w) in pairs if w / _s >= 0.06]
+            _s = sum(w for _b, w in pairs) or 1.0
+            pairs = [(b, w / _s) for (b, w) in pairs]
+        out.append(pairs)
+    return out
+
 
 
 # ----------------------------------------------------------------------------
@@ -1635,7 +1946,38 @@ def gen_walk(sk, info, args, fps, dur):
             j = _SEG_J.get(str(pp.get("cls") or ""), _i)
             base = 1.0 - 0.30 * j
             k = amp * k_arm * base
-            if arm_front:
+            if arm_front and getattr(args, "joint_bend", True):
+                # 真实关节弯曲(网格版): 肩摆 + 肘弯 + 腕补一点。
+                # 但只写旋转的话, 屏幕上就只剩"左右转"(用户: "现在的仅左右摆动") ——
+                # 正面角色表达"前后", 还得靠透视缩短(scaleY) + 抬升/下沉。所以这里
+                # 两套一起用: 关节照弯(网格形变), 同时保留缩短和升降来读成前后摆。
+                if j == 0:
+                    # 正面角色: 肩只留一点点横向角(投影), 主要靠"缩短 + 抬手"表达前摆。
+                    # 侧向角给多了, 屏幕上就只剩左右甩(用户反复说"仅左右摆动") ——
+                    # 竖直位移才是"往前伸"的读感, 所以位移主要写在 y 上。
+                    # 幅度再收一档(用户: "手动作的幅度太大"): 竖移 7 -> 3.5px,
+                    # 压扁 16% -> 9%, 横移几乎去掉。手部竖向行程落在 2~3px。
+                    # 左右大臂必须【严格互为镜像】, 只靠 p_arm 的 π 相位差形成
+                    # "一前一后"。这里不再乘 sign, 而且前摆/后摆用同一个系数:
+                    #   以前 y 写 (3.5*fwd - 1.4*bwd) —— 前摆抬 3.5px、后摆只落
+                    #   1.4px, 两条臂又是反相的, 于是任一瞬间右肩抬 5.8px、左肩
+                    #   只落 2.1px (实测), 看起来就是"右臂上半截在动、左臂几乎不动"。
+                    # 现在 y = 2.4*(fwd-bwd): 两臂升降幅度一模一样, 只有方向相反。
+                    _sw = fwd - bwd                    # = sin(p_arm), 带符号
+                    sr(b, args.arm_swing * 0.10 * k * _sw)
+                    st(b, 0.10 * _sw * k, 2.4 * _sw * k)
+                    ss(b, 1.0 + 0.006 * _sw * k, 1.0 - 0.06 * _sw * k)
+                elif j == 1:
+                    # 肘只往一个方向弯: 前摆越多弯得越深, 后摆回直, 永不反折
+                    # 肘弯压到 1/3: 正面视角下小臂"在平面内转动"读出来就是手往外甩
+                    # (用户: "仅左右摆动")。前摆主要交给缩短 + 抬手。
+                    sr(b, sign * args.arm_bend * k * 0.30 * np.clip(0.12 + 0.88 * fwd, 0.0, 1.0))
+                    # 小臂只压扁不位移(位移会把护腕从袖口揭开), 锚点在肘上
+                    ss(b, 1.0 + (0.008 * fwd - 0.004 * bwd) * k,
+                           1.0 - (0.12 * fwd - 0.045 * bwd) * k)
+                else:
+                    sr(b, sign * 0.22 * args.arm_bend * k * fwd)
+            elif arm_front:
                 # 前摆: 手抬高 + 手臂透视缩短 + 往身体中线收;
                 # 后摆: 手放低 + 手臂拉直(略长) + 往外撇一点。
                 # 两者都跟对侧腿同相, 不再用 |sin| 双倍频。
@@ -1698,7 +2040,20 @@ def gen_walk(sk, info, args, fps, dur):
         s1 = np.sin(phs)                            # +1 迈前 / -1 在后
         fwd = np.clip(s1, 0.0, None)                # 0=支撑 1=完全迈出
         a_knee = -args.knee_bend * amp * (0.5 + 0.5 * s1) ** 1.6
-        if leg_front:
+        if leg_front and getattr(args, "joint_bend", True):
+            # 真实屈膝。注意"正面角色"的步子要靠【抬脚】读出来:
+            # 髋旋转会把脚往左右甩(x 行程 20px、y 才 2px), 看着像蹭地滑步,
+            # 所以髋只留一点点侧摆, 抬腿高度用满 leg_lift, 脚掌再回正让它踩平。
+            # 正面角色的"迈步"主要靠三件事一起给: 抬高(translate) + 透视缩短
+            # (scaleY) + 屈膝(角度)。只给角度会变成"脚在原地左右蹭", 只给压扁
+            # 又完全没有网格形变 —— 三者按老配方配比, 屈膝从 0.45 提到 0.7。
+            a_hip = 0.30 * args.leg_swing * amp * s1
+            sr(b_hip, a_hip)
+            sr(b_knee, 0.7 * a_knee)
+            sr(b_foot, 0.45 * args.knee_bend * amp * fwd)
+            ss(b_hip, np.ones(F + 1), 1.0 - args.leg_squash * amp * fwd)
+            st(b_hip, np.zeros(F + 1), args.leg_lift * amp * fwd)
+        elif leg_front:
             a_hip = 0.30 * args.leg_swing * amp * s1
             sr(b_hip, a_hip)
             sr(b_knee, a_knee * 0.45)               # 膝盖只微弯, 主靠透视缩短
@@ -2058,6 +2413,32 @@ def gen_animation(sk, info, args, fps, dur):
     return anim, F, T
 
 
+def _rigid_weapon_arm(anim, sk, fps, F):
+    """持械的那条手臂不做 scaleY 压扁 —— 让刀/盾在任何运行时都是刚性的。
+
+    以前是给道具骨写一条 scale = 1/父链缩放 来抵消, 靠的是"运行时支持骨骼缩放轨道"。
+    实测在编辑器里看到的是**枪尖位移跟父骨不匹配**: 如果那一侧把道具骨的 scale 轨道
+    丢了(或只对网格生效), 刀就会跟着手臂一起被压扁 ~10%, 刀尖来回伸缩十几像素。
+    与其赌运行时, 不如从源头不让它压扁: 把道具骨到躯干之间的 scale 轨道删掉。
+    代价: 持械臂少了"透视缩短"那 5~8%, 但手臂照样有旋转和位移, 肉眼几乎无感。
+    """
+    tracks = anim.get("bones") or {}
+    if not tracks:
+        return
+    for b in sk.bones:
+        if not b.name.startswith("prop_"):
+            continue
+        q = b.parent
+        while q is not None and q.name not in ("torso", "root"):
+            tl = tracks.get(q.name)
+            if tl:
+                tl.pop("scale", None)
+            q = q.parent
+        tl = tracks.get(b.name)
+        if tl:
+            tl.pop("scale", None)          # 道具骨自己也不需要补偿了
+
+
 def _root_reset_guard(anim, sk, action):
     """给"非死亡"动作补一条 root 的 静止关键帧(只在原本没有该通道时补)。
 
@@ -2342,7 +2723,10 @@ def build_spine_json(parts, sk, info, anim, cw, ch, F, T, action="idle", fps=30)
     if tcons:
         spine["transform"] = tcons
     att = spine["skins"][0]["attachments"]
-    for p in parts:
+    # 绘制顺序 = slot 顺序(后面的画在上面)。coords 里可以用 "z" 覆盖:
+    # z 小的先画(被盖住), 同 z 保持拆图顺序。用来做"某只手在躯干后面"这种遮挡关系。
+    draw = sorted(enumerate(parts), key=lambda it: (it[1].get("z", 0), it[0]))
+    for _idx, p in draw:
         # slot 要挂到"主导骨"上, 不能全写 root: 龙骨这类编辑器导入后会按骨骼给
         # slot 重新排队, 全挂 root 就等于没告诉它谁属于谁 —— 实测头饰被排到最底、
         # 头盔被脸盖住。spine 官方导出也总是写具体骨骼。
@@ -2365,8 +2749,12 @@ def build_spine_json(parts, sk, info, anim, cw, ch, F, T, action="idle", fps=30)
         verts = skin_vertices(
             [(float(x), float(y)) for (x, y) in p["v_spine"]],
             p["bone_weights"])
+        # 注意: Spine 的 JSON 里**没有** "skinned" 字段 —— 是否带权重是由
+        # vertices 长度 > uvs 长度推断的(官方文档原文)。瞎加字段反而可能被严格
+        # 的解析器拒绝, 所以这里保持和官方导出器一致的字段集合。
         att[p["name"]] = {p["attachment"]: {
-            "type": "mesh", "uvs": p["uvs"], "triangles": p["triangles"],
+            "type": "mesh",
+            "uvs": p["uvs"], "triangles": p["triangles"],
             "vertices": verts, "hull": p["hull"], "edges": p["edges"],
             "width": p["iw"], "height": p["ih"]}}
     # 眨眼 deform 时间线 (眼/睫毛网格挤压, 不经骨骼)
@@ -2465,6 +2853,15 @@ def _gen_one(args, action, out_path, dur, coords, cw, ch):
     img_dir = os.path.join(out_dir, "images")
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
+    # images/ 是"本次用到的部件图"的副本, 必须清空重写 —— 不清的话上一版拆图留下的
+    # 碎件(arm_upper_M / arm_fore_M_2 / headwear ...)会一直躺在里面, 用户按目录
+    # 检查时以为它们还在。
+    for _f in os.listdir(img_dir):
+        if _f.lower().endswith(".png"):
+            try:
+                os.remove(os.path.join(img_dir, _f))
+            except OSError:
+                pass
 
     parts = load_parts(coords, args.parts, img_dir, ch, args.square_mesh)
     if coords.pop("_wear_split", False):
@@ -2488,6 +2885,7 @@ def _gen_one(args, action, out_path, dur, coords, cw, ch):
     sk, info = build_skeleton(parts, cw, ch, args)
     assign_weights(parts, sk, info, args)
     anim, F, T = gen_animation(sk, info, args, args.fps, dur)
+    _rigid_weapon_arm(anim, sk, args.fps, F)           # 持械臂不压扁, 武器才不会伸缩
     global _LAST_ANIM
     _LAST_ANIM = anim
     spine = build_spine_json(parts, sk, info, anim, cw, ch, F, T,
@@ -2577,6 +2975,14 @@ def main():
                     help="行走: 膝盖弯曲 deg")
     ap.add_argument("--leg-lift", type=float, default=6.0,
                     help="行走: 摆动相抬脚 px")
+    ap.add_argument("--arm-bend", type=float, default=22.0,
+                    help="肘部弯曲幅度(度)。网格版用真实关节弯曲, 取代以前"
+                         "'scaleY 压扁 + 1~2px 微移'模拟摆臂的做法")
+    ap.add_argument("--joint-bend", dest="joint_bend", action="store_true",
+                    default=True,
+                    help="四肢用真实关节弯曲(默认开, 配合网格蒙皮)")
+    ap.add_argument("--no-joint-bend", dest="joint_bend", action="store_false",
+                    help="回到旧的'压扁+微移'摆臂(给纯图片版用)")
     ap.add_argument("--leg-squash", type=float, default=0.15,
                     help="行走: 迈出腿的大腿透视缩短比例(0~0.3)")
     ap.add_argument("--leg-axis", default="front", choices=("front", "side"),
@@ -2693,6 +3099,7 @@ def main():
     ch = canv["h"] if isinstance(canv, dict) else canv[1]
 
     args._markers = load_bone_markers(args.bones_json, args.coords, ch)
+    args._rigid = load_rigid(args.coords)
 
     actions = _parse_actions(args.action)
     base_dir, targets = _resolve_targets(args, actions)

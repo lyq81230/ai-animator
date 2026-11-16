@@ -48,6 +48,10 @@ PLUME_POLY = [
 ]
 
 FACE_PARTS = ["ears", "nose", "mouth", "eyelash", "eyebrow"]
+# 这些部件要原样保留: 眼睛是独立动画层(绑定姿态靠 scale 0.001 隐藏),
+# 如果把脸范围内的像素清掉, 就再也闪不了眼了。
+KEEP_PARTS = ["eyes_closed", "eyewhite", "irides"]
+
 
 
 def poly_mask(poly, w, h):
@@ -125,7 +129,8 @@ def apply(c, D):
     # 1) 别的部位里, 落在新 mask 内的像素清掉(这些像素归 head/headwear)
     take = head | orn
     for p in c["parts"]:
-        if p["name"] in ("head", "headwear") or p["name"] in FACE_PARTS:
+        if (p["name"] in ("head", "headwear") or p["name"] in FACE_PARTS
+                or p["name"] in KEEP_PARTS):
             continue
         im = Image.open(os.path.join(D, "parts", p["image"])).convert("RGBA")
         a = np.array(im)
@@ -226,8 +231,12 @@ def apply(c, D):
 
 
 def main():
+    global D
+    argv = sys.argv[1:]
+    if "--dir" in argv:                      # 指到别的目录(用来试重建)
+        D = argv[argv.index("--dir") + 1]
     c = json.load(open(os.path.join(D, "coords.json"), encoding="utf-8"))
-    if "--preview" in sys.argv:
+    if "--preview" in argv:
         preview(c)
         return
     apply(c, D)

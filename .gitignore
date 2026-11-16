@@ -48,3 +48,22 @@ secrets.json
 
 # ===== 本地开发笔记（不上传）=====
 docs/NOTES.md
+
+# ===== 本地临时产物 / 一次性调试留档（不进仓库）=====
+# 下划线开头的是这一路的排查留档: _bak_* 备份、_preview_out 对比图、
+# _ref 参考素材、_*.py 临时探针脚本、_*.npy 掩码缓存。
+_*/
+_*.*
+*.npy
+
+# 迭代过程中的旧版头/头巾重建脚本，已被 fix_zombie_head.py 和
+# repair_scarf_v2.py 取代，留着只会让人不知道该跑哪个。
+rebuild_head_v?.py
+rebuild_head_clean.py
+rebuild_head_final.py
+rebuild_scarf_unified.py
+fix_scarf_unify.py
+
+# 上面 *.png 是整体忽略的，但 config/ 下的部件模板是重建要用的母本，
+# 必须跟着仓库走（比如皮甲的盾牌模板，少了它 extract_shield 就断）。
+!config/*/shield/*.png
