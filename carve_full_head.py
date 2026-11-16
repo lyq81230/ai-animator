@@ -14,9 +14,9 @@
 用法:
     python carve_full_head.py <角色目录> [--curve 60,0,75,85,...]
                               [--parts topwear,arm_upper_L,arm_upper_R]
-                              [--dry] [--preview 对比图.png]
+                              [--dry] [--apply] [--preview 对比图.png]
 
-默认不落盘(--dry)。确认预览后再去掉 --dry 正式应用。
+默认只预览不落盘; 确认预览后加 --apply 才正式写入。
 会自动备份被改的 png 为 <name>.png.bak_head, 并同步 parts/ 与上层的
 两份 coords.json。
 """
@@ -113,7 +113,8 @@ def main():
         return 1
     D = args[0]
     flags = sys.argv[1:]
-    dry = "--dry" in flags
+    # 破坏性脚本: 默认只预览, 必须显式 --apply 才写盘
+    dry = "--apply" not in flags
     curve = DEFAULT_CURVE
     targets = list(DEFAULT_PARTS)
     preview = None
@@ -168,7 +169,7 @@ def main():
                           ensure_ascii=False, indent=2)
         print("  已落盘, coords 两份已同步")
     else:
-        print("  --dry: 未修改任何文件")
+        print("  未指定 --apply: 仅预览, 未修改任何文件")
 
     if preview:
         build_preview(D, co, W, H, canv, outs, head, preview, dry)
