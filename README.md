@@ -56,6 +56,24 @@ output/<素材名>/
 
 每个动作默认时长：待机 5s / 行走 2s / 受击 0.9s / 死亡 2s。
 
+## 批量重建与后处理链
+
+`rebuild_all.py` 是命令行入口，一条命令跑完整套：
+
+```bash
+python rebuild_all.py sprite_pi_white_336        # 重新拆图 + 后处理 + 出行走/受击/死亡
+python rebuild_all.py sprite_pi_white_336 --no-split   # 只重出动作，沿用现有拆图
+python rebuild_all.py                            # 全部角色
+```
+
+拆图后面接的一串修补写在文件顶部的 `COMMON_POST` / `POST_FIX` / `POST_FIX_LATE`
+和 `DRAW_BEHIND` / `DRAW_Z` 里：清残片、出血、修边、按角色抠形、调绘制顺序。
+GUI 的拆图步骤读的是**同一份配置**，所以「界面里重新拆图」和「命令行重建」
+出来的部件是同一套，不会一个有一个没有。
+
+`config/<角色>/` 存每个角色的人工配置（绘制顺序、刚性部件、部件模板如盾牌），
+是母本：`output/` 被清掉、换机器，也能靠它把状态恢复回来。
+
 ## 可选：AI 自动拆图
 
 手里只有一张平面图时，程序可以调模型自动分层（分出 24 个部位，手臂再切成大臂-小臂-手三段，
