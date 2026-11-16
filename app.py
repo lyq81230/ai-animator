@@ -400,16 +400,21 @@ class Main(QMainWindow):
         wear_row.addWidget(self.head_wear, 1)
         sg.addLayout(wear_row, 2, 0, 1, 2)
 
-        # 全参数 / 量化 二选一。勾上=未量化的 layerdiff3d_bf16(画质最好、慢数倍、
-        # 吃 ~14GB 显存); 不勾=nf4 量化版(快、约 8GB)。选择记在 QSettings 里,
-        # 下次启动保持上次的档位。
+        # 全参数 / 量化 二选一，默认不勾(量化版)。勾上=未量化的 layerdiff3d_bf16
+        # (画质最好、慢数倍、吃 ~14GB 显存); 不勾=nf4 量化版(快、约 8GB)。
+        # 这个勾选同时决定【安装 AI 拆图组件】下哪套权重:
+        #   不勾 -> 只下量化模型(约 6.7GB); 勾上 -> 再追加全参数 bf16(约 10GB)。
+        # 选择记在 QSettings 里, 下次启动保持上次的档位。键名带 v2 是因为旧版默认
+        # 是"勾上", 本机可能已存下 true; 换键才能让新默认(不勾)立即生效。
         self.cb_full = QCheckBox("全参数模型（画质最好，慢数倍）")
         self.cb_full.setToolTip(
             "勾上：AI 分层用未量化的 layerdiff3d_bf16 权重，细节/边缘最准，\n"
             "　　　但单张图要跑十几分钟，显存约 14GB（不足会自动退回量化版）。\n"
             "不勾：用 nf4 量化版，一两分钟出结果、约 8GB 显存，绝大多数图够用。\n"
+            "【安装 AI 拆图组件】按这里的勾选下载模型：不勾只装量化版，\n"
+            "勾上再追加全参数权重（多约 10GB）。\n"
             "换档位后点【① 重新拆图】才会重跑推理（旧缓存会按档位失效）。")
-        _fv = self.settings.value("full_model", True)
+        _fv = self.settings.value("full_model_v2", False)
         if isinstance(_fv, str):
             _fv = _fv.strip().lower() in ("1", "true", "yes", "on")
         self.cb_full.setChecked(bool(_fv))
@@ -528,9 +533,11 @@ class Main(QMainWindow):
         self.btn_open.setEnabled(False)
         left.addWidget(self.btn_open)
 
-        self.btn_install = QPushButton("安装 AI 拆图组件 (约 12GB)")
+        self.btn_install = QPushButton(self._install_label())
         self.btn_install.setToolTip(
-            "平面图自动拆层需要 PyTorch + LayerDiff3D 模型, 需 NVIDIA 显卡")
+            "平面图自动拆层需要 PyTorch + LayerDiff3D 模型, 需 NVIDIA 显卡。\n"
+            "按上方「全参数模型」的勾选下载对应权重:\n"
+            "不勾 = 量化版(合计约 12GB), 勾上 = 再追加全参数(合计约 22GB)。")
         self.btn_install.clicked.connect(self.install_st)
         left.addWidget(self.btn_install)
 
@@ -836,16 +843,24 @@ class Main(QMainWindow):
         self._refresh_controls()
 
     # ------------------------------------------------------------ 全参数 / 量化
+    def _install_label(self):
+        """安装按钮上的体积提示跟着当前模型档位走。"""
+        return ("安装 AI 拆图组件 (约 22GB)" if self.cb_full.isChecked()
+                else "安装 AI 拆图组件 (约 12GB)")
+
     def _on_full_model_changed(self, on):
         on = bool(on)
-        self.settings.setValue("full_model", on)
+        self.settings.setValue("full_model_v2", on)
         txt = ST.model_text(on)
         self.status.setText("AI 分层: " + txt)
         self.logbox.appendPlainText(f"\n[模型] 已切到 {txt}")
+        # 构造期间 btn_install 还没建出来, 所以做一次存在性判断
+        if hasattr(self, "btn_install"):
+            self.btn_install.setText(self._install_label())
         if on and not ST.full_ready():
             self.logbox.appendPlainText(
-                "全参数权重缺失，本次会按量化版跑。要真用全参数：\n"
-                "  python st_download.py --full    # 约 10GB")
+                "全参数权重尚未下载。保持勾选并点【安装 AI 拆图组件】即可补装；\n"
+                "补装前这次拆图仍会按量化版跑。")
 
     # ------------------------------------------------------------ 有头发 / 无头发
     def _on_head_wear_changed(self, _idx):
@@ -1169,12 +1184,21 @@ class Main(QMainWindow):
         self.worker.start()
 
     def install_st(self):
+        # 安装哪套权重由「全参数模型」勾选框决定：不勾=量化，勾上=追加全参数。
+        full = bool(self.cb_full.isChecked())
+        tier = "全参数模型" if full else "量化模型"
+        size = "22GB" if full else "12GB"
         self.logbox.clear()
         self.logbox.appendPlainText(
-            "安装 AI 拆图组件: PyTorch(CUDA12.8) + 推理依赖 + 模型, 合计约 12GB。\n"
+            "安装 AI 拆图组件: PyTorch(CUDA12.8) + 推理依赖 + "
+            f"{tier}，合计约 {size}。\n"
             "需要 NVIDIA 显卡 (建议 8GB 显存以上), 全程可能十几分钟。")
+        if full:
+            self.logbox.appendPlainText(
+                "全参数推理仍要用到量化版 depth 模型，本次会在量化基础包之外"
+                "再追加 bf16 权重。")
         steps = [{"type": "cmd", "label": lb, "cmd": cmd, "env": env}
-                 for lb, cmd, env in ST.install_steps()]
+                 for lb, cmd, env in ST.install_steps(full)]
         self.mode = "install"
         self._set_busy(True)
         self.worker = Worker(steps)

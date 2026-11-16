@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""st_download.py — 下载 AI 拆图所需的 3 个模型仓库到 ST_MODELS 目录。"""
+"""st_download.py — 下载 AI 拆图所需的模型仓库到 ST_MODELS 目录。
+
+默认只下量化版 MODEL_JOBS(约 6.7GB)；带 --full 或 ST_FULL=1 时再追加
+全参数 layerdiff3d_bf16(约 10GB)。界面的「全参数模型」勾选决定传不传 --full。
+"""
 import fnmatch
 import os
 import sys

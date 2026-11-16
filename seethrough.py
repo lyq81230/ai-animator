@@ -3,9 +3,12 @@
 """
 seethrough.py — AI 自动拆图（see-through / LayerDiff3D）的环境探测、按需安装与调用。
 
-包默认不带模型与推理依赖（合计约 12GB），首次使用时下载安装到：
+包默认不带模型与推理依赖，首次使用时下载安装到：
     <包>\python           推理依赖 (torch cu128 + diffusers ...)
-    <包>\models           3 个模型仓库 (~6.7GB)
+    <包>\models           4 个模型仓库 (量化版 ~6.7GB)
+
+默认档位是量化版：依赖 + 模型合计约 12GB。界面勾上「全参数模型」后，
+安装会再追加 layerdiff3d_bf16 权重 (~10GB)，合计约 22GB。
 
 可用 st_env.txt 覆盖（每行 KEY=VALUE），用于复用机器上已有的环境：
     PY=D:\some\.venv\Scripts\python.exe
@@ -46,10 +49,10 @@ MODEL_JOBS = [
      ["scheduler/*"]),
 ]
 
-# 可选模型: 不进"就绪"判定(量化版三个目录齐了就算就绪), 但**会被用到** ——
+# 可选模型: 不进"就绪"判定(量化版 MODEL_JOBS 齐了就算就绪), 但**会被用到** ——
 # 界面上勾了「全参数模型」时 infer_cmd 会把 layerdiff 换成本目录里的 bf16 权重。
 # 没下载时 full_ready() 返回 False, 自动回退量化版, 不会报错。
-# 用 `python st_download.py --full` 下载。
+# 安装按钮在勾选状态下会跑 `python st_download.py --full` 把这一份一并下下来。
 OPTIONAL_JOBS = [
     # 全参数(未量化) layerdiff3d, 对应 --quant_mode none。UNet 单文件 8.1GB,
     # 需要 12GB 以上显存(或靠分组 offload 硬挤)。
@@ -165,7 +168,7 @@ def model_text(full=False):
         return "量化版 layerdiff3d_nf4 (快、约 8GB 显存)"
     if not full_ready():
         return ("全参数权重缺失 (models/layerdiff3d_bf16), 已自动回退量化版; "
-                "要全参数先跑 python st_download.py --full")
+                "要全参数请勾选「全参数模型」后点【安装 AI 拆图组件】")
     return "全参数 bf16 layerdiff3d_bf16 (质量最好、需 ~14GB 显存、慢数倍)"
 
 
@@ -208,9 +211,19 @@ def _env(extra=None):
 
 
 # ------------------------------------------------------------------ 安装步骤
-def install_steps():
-    """返回 [(label, cmd, env), ...]：装依赖 + 下模型。"""
+def install_steps(full=False):
+    """返回 [(label, cmd, env), ...]：装依赖 + 下模型。
+
+    full=False 只下量化模型(nf4, 约 6.7GB) —— 界面默认档位。
+    full=True  在量化模型基础上追加全参数权重(layerdiff3d_bf16, 再约 10GB)。
+    全参数推理仍要用到量化版的 depth 模型(marigold_nf4), 所以 full=True 是
+    "基础包 + 全参数增量", 不是"只装全参数"。
+    值由界面上的「全参数模型」勾选框传入。
+    """
     py, _repo, models = paths()
+    dl = [py, os.path.join(PKG, "st_download.py")]
+    if full:
+        dl.append("--full")
     steps = [
         ("安装 PyTorch (CUDA 12.8, 约 3GB)",
          [py, "-m", "pip", "install", "--no-warn-script-location",
@@ -218,8 +231,9 @@ def install_steps():
         ("安装推理依赖 (约 2GB)",
          [py, "-m", "pip", "install", "--no-warn-script-location"] + ST_PKGS,
          _env()),
-        ("下载模型 (约 6.7GB)",
-         [py, os.path.join(PKG, "st_download.py")],
+        (("下载模型 (全参数 + 量化, 约 17GB)" if full
+          else "下载模型 (量化版, 约 6.7GB)"),
+         dl,
          _env({"ST_MODELS": models})),
     ]
     return steps
