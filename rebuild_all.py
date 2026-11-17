@@ -126,6 +126,12 @@ POST_FIX = {"sprite_boss_lvbu_white_336": ["fix_lvbu_head.py"],
 # 裙摆和甲片, harden_prop_rim 又把它压成不透明)。所以这类"要从原图上精确抠形"的
 # 处理放在最后。
 POST_FIX_LATE = {"sprite_boss_dongzhuo_white_336": [
+    # AI 把左裙甲的一块甲片(310px, 带金钉)判进了 sword 层 —— 武器跟手骨甩,
+    # 甲片留在武器上就是"剑带了块盔甲"。甲片与剑身单连通(move_island 的
+    # 洪泛会把剑一起搬走), 用 move_rect 按画布矩形搬: 矩形避开上方护手
+    # (y<210)和右侧剑刃(x>=243), 甲片在原画里被剑压住, 搬到底层观感不变。
+    "move_rect.py output/sprite_boss_dongzhuo_white_336 "
+    "--from sword --to topwear --rect 225,210,243,266",
     # AI 把头部下半段(脸/须)整块 1494px 复制进了 topwear, head 画在 topwear
     # 之上 —— 头一动就露出一张"贴在胸口的脸"。抠掉 head 覆盖的像素, 留 2px
     # 垫边防缝(与 fashu 的下巴同一类问题)。
