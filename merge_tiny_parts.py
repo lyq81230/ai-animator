@@ -206,6 +206,13 @@ def merge(work, dry=False, verbose=True):
     if n_merged and not dry:
         json.dump(co, open(cp, "w", encoding="utf-8"),
                   ensure_ascii=False, indent=1)
+        # parts/coords.json 必须同步: 本脚本删了部件 png, 只写顶层的话
+        # parts/coords.json 还留着已删文件的条目, app 收尾会把这份陈旧
+        # coords 拷回顶层(魔神 12:30 重拆"拆图不完整"就是这么来的)。
+        pc = os.path.join(work, "parts", "coords.json")
+        if os.path.isdir(os.path.dirname(pc)):
+            json.dump(co, open(pc, "w", encoding="utf-8"),
+                      ensure_ascii=False, indent=1)
     print("  碎片合并: %d 个" % n_merged)
     return n_merged
 

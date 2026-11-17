@@ -159,6 +159,11 @@ def main():
         Image.fromarray(sub, "RGBA").save(os.path.join(D, "parts", p["image"]))
         p.update({"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0})
     json.dump(co, open(cp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    # 同步 parts/coords.json: 本脚本重裁了部件尺寸, 只写顶层的话 app 收尾
+    # 的"parts/coords.json -> coords.json"拷贝会把旧尺寸盖回来。
+    pc = os.path.join(D, "parts", "coords.json")
+    if os.path.isdir(os.path.dirname(pc)):
+        json.dump(co, open(pc, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     print("  写回完成, 共摘掉 %d px" % changed)
 
 

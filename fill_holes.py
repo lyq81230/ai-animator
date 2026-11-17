@@ -75,6 +75,11 @@ def main():
     print(f"剩余空洞 {int(((src[...,3]>al)&(lab2==0)).sum())}px")
     json.dump(c, open(os.path.join(D, "coords.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
+    # 同步 parts/coords.json: 只写顶层的话, app 收尾"parts/coords.json -> coords.json"
+    # 的拷贝会把旧条目盖回来(与 merge_tiny_parts 同一个坑)。
+    pc = os.path.join(D, "parts", "coords.json")
+    if os.path.isdir(os.path.dirname(pc)):
+        json.dump(c, open(pc, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
