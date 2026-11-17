@@ -126,6 +126,10 @@ POST_FIX = {"sprite_boss_lvbu_white_336": ["fix_lvbu_head.py"],
 # 裙摆和甲片, harden_prop_rim 又把它压成不透明)。所以这类"要从原图上精确抠形"的
 # 处理放在最后。
 POST_FIX_LATE = {"sprite_boss_dongzhuo_white_336": [
+    # AI 把头部下半段(脸/须)整块 1494px 复制进了 topwear, head 画在 topwear
+    # 之上 —— 头一动就露出一张"贴在胸口的脸"。抠掉 head 覆盖的像素, 留 2px
+    # 垫边防缝(与 fashu 的下巴同一类问题)。
+    "cut_head_from_body.py output/sprite_boss_dongzhuo_white_336 --erode=2",
     "fix_dongzhuo_legs.py output/sprite_boss_dongzhuo_white_336"],
     # 僵尸扇子男: AI 给的 head 只有半个脸, 眼睛挖成两个大洞; 之前几轮都从坏掉的
     # head.png 出发反复裁, 越裁越小, 和头巾中间那道白缝就是"拆图错误"的来源。
