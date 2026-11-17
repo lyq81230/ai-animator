@@ -593,6 +593,24 @@ def load_rigid(coords_path):
     return out
 
 
+def load_rig_params(coords_path):
+    """读 rig.json 的 {"params": {...}} —— 按角色参数校准(可选)。
+
+    app/命令行对每个角色都传同一套默认参数, 但个别角色需要微调: 大头重盔的
+    boss 头部随步位移/点头/扭身全按默认走, 看着就是"头在身上飘"。参数在
+    parse 之后覆盖 args, CLI 与 app 两边自动一致, 优先级最高。
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(coords_path)), "rig.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        d = json.load(open(path, encoding="utf-8"))
+        return d.get("params") or {}
+    except Exception as _e:                            # noqa: BLE001
+        print(f"  rig.json params 读取失败: {_e}")
+        return {}
+
+
 def load_bone_markers(bones_json, coords_path, ch):
     """读手标骨链。格式见 IDLE_ALGORITHM.md 8.7。
     返回 dict: {'arm':{'L':[pts],'R':[pts]}, 'hair':[[pts],...],
@@ -1007,12 +1025,20 @@ def build_skeleton(parts, cw, ch, args):
             hit = next((bd for (pp, bd) in chain if pp["name"] == target), None)
             if hit is None:
                 continue
-            # 握点/父骨: 有手骨就挂手骨(武器绕腕转); 没有手骨就用"武器与这条手臂
-            # 最近的一对点"当握把 —— 之前固定用 hit 的骨原点(=肩/肘), 刀就绕肩膀转,
-            # 尖端甩得最远, 看着像"刀尖没跟手"。
+            # 握点/父骨: 父骨挂手骨(继承整条手臂的运动); 位置放在
+            # 【武器与跟随部件轮廓最近的一对点】= 真正被拳头攥住的位置。
+            # 不能用腕骨原点: 斧/杖的杆在拳头下方, 拳心离腕骨差几十 px
+            # (lvbu 差 26px), 武器绕腕转时杆在拳头里滑动、杆上端在前臂
+            # 后缘探出/缩进 —— 看着就是"武器折断"。绕握点转, 拳头里那段
+            # 杆不动, 只有梢甩。没有手骨就用同一条最近点对当握把 —— 之前
+            # 固定用 hit 的骨原点(=肩/肘), 刀就绕肩膀转, 尖端甩得最远,
+            # 看着像"刀尖没跟手"。
             hand = sk.get(f"arm_{label}_hand")
+            fp = next((pp for (pp, bd) in chain if pp["name"] == target), None)
             if hand is not None:
-                parent, gx, gy = hand, hand.wx, hand.wy
+                parent = hand
+                gx, gy = (_closest_pair_joint(fp["v_spine"], p["v_spine"])
+                          if fp is not None else (hand.wx, hand.wy))
             else:
                 tp = next((pp for (pp, bd) in chain if bd is hit), None)
                 if tp is not None:
@@ -3100,6 +3126,18 @@ def main():
 
     args._markers = load_bone_markers(args.bones_json, args.coords, ch)
     args._rigid = load_rigid(args.coords)
+    # 按角色参数校准(rig.json {"params": {...}}): 覆盖命令行/默认值, 两边一致
+    for _k, _v in load_rig_params(args.coords).items():
+        _attr = str(_k).strip().lstrip("-").replace("-", "_")
+        if not _attr or not hasattr(args, _attr):
+            print(f"  rig.json 参数 {_k} 不存在, 跳过")
+            continue
+        try:
+            _old = getattr(args, _attr)
+            setattr(args, _attr, type(_old)(_v))
+            print(f"  rig.json 参数校准: --{_attr.replace('_', '-')} = {_v}")
+        except Exception as _e:                        # noqa: BLE001
+            print(f"  rig.json 参数 {_k} 跳过: {_e}")
 
     actions = _parse_actions(args.action)
     base_dir, targets = _resolve_targets(args, actions)

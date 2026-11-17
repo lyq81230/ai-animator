@@ -1232,6 +1232,18 @@ class Main(QMainWindow):
         if not self.cb_blink.isChecked():
             d["blink-depth"] = 0.0
         keys = self._checked_actions() or [self.action]
+        # rig.json 的按角色参数校准(config 母本)必须在生成前落到工作目录:
+        # gen_idle_bones 从 --coords 同目录读 rig.json, 不拷贝的话 app 里
+        # 生成的动作不会带上角色校准(和命令行 rebuild_all 不一致)。
+        try:
+            import rebuild_all as _RBR
+            _cn = os.path.basename(os.path.normpath(self.work))
+            _src_rig = os.path.join(HERE, "config", _cn, "rig.json")
+            if os.path.isfile(_src_rig):
+                os.makedirs(self.work, exist_ok=True)
+                shutil.copy2(_src_rig, os.path.join(self.work, "rig.json"))
+        except Exception as _e:                     # noqa: BLE001
+            print("rig.json 同步跳过:", _e)
         multi = len(keys) > 1
         cmd = [sys.executable, os.path.join(HERE, "gen_idle_bones.py"),
                "--parts", os.path.join(self.work, "parts"),

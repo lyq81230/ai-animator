@@ -1,0 +1,8 @@
+{
+  "params": {
+    "twist": 1.2,
+    "sway": 2.5,
+    "head-nod": 0.8,
+    "head-tilt": 0.3
+  }
+}
