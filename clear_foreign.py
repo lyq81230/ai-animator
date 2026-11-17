@@ -21,7 +21,9 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage as ndi
 
-HOST = ("topwear", "leg_L", "leg_R", "headwear", "body")
+# bottomwear(裙甲)也算宿主: suo 的右手整块被判进裙甲右缘(342px), 手一动就露出
+# 一只"粘在裙子上的手"。补色只动 RGB 不动 alpha, 手静止时被手盖住看不见。
+HOST = ("topwear", "bottomwear", "leg_L", "leg_R", "headwear", "body")
 FOREIGN_CLS = {"arm_upper", "arm_fore", "arm_hand", "prop"}
 
 
