@@ -2703,8 +2703,17 @@ def _maybe_carve_head(root):
     cf = os.path.join(root, "carve_head.json")
     if not os.path.isfile(cf):
         # 也可以放 config/<角色名>/ 下随仓库走 —— output/ 被整目录清掉时仍在。
-        cf = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "config", os.path.basename(root), "carve_head.json")
+        # 改名副本(如 *_tipfix_preview)按"最长母本前缀"继承 config 下的同名目录,
+        # 否则换名重拆会丢掉已修好的头部归位参数。
+        _name = os.path.basename(root)
+        _cfg_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
+        _cand = os.path.join(_cfg_root, _name)
+        if not os.path.isdir(_cand):
+            _hits = [d for d in (os.listdir(_cfg_root) if os.path.isdir(_cfg_root) else [])
+                     if os.path.isdir(os.path.join(_cfg_root, d)) and _name.startswith(d)]
+            if _hits:
+                _cand = os.path.join(_cfg_root, max(_hits, key=len))
+        cf = os.path.join(_cand, "carve_head.json")
     if not os.path.isfile(cf):
         return
     try:

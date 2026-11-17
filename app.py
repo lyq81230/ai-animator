@@ -1016,7 +1016,8 @@ class Main(QMainWindow):
                 _cn = os.path.basename(os.path.normpath(self.work))
                 if getattr(_RB0, "DROP_PARTS", ""):
                     _split_cmd += ["--drop-parts", _RB0.DROP_PARTS]
-                if _cn in getattr(_RB0, "CARVE_HEAD", set()):
+                # cfg_key: 改名副本(如 *_tipfix_preview)继承母本的挖头配置
+                if _RB0.cfg_key(getattr(_RB0, "CARVE_HEAD", set()), _cn):
                     _split_cmd.append("--carve-head")
             except Exception as _e:                     # noqa: BLE001
                 print("拆图参数沿用默认:", _e)
@@ -1033,15 +1034,17 @@ class Main(QMainWindow):
                 import rebuild_all as _RBZ
                 _zn = os.path.basename(os.path.normpath(self.work))
                 _sd = os.path.join(HERE, "set_draw_order.py")
-                if _zn in getattr(_RBZ, "DRAW_BEHIND", {}):
+                _zb = _RBZ.cfg_key(getattr(_RBZ, "DRAW_BEHIND", {}), _zn)
+                if _zb:
                     steps.append({"type": "cmd", "label": "绘制顺序",
                                   "cmd": [sys.executable, _sd, self.work,
-                                          "--behind", *_RBZ.DRAW_BEHIND[_zn]]})
-                if _zn in getattr(_RBZ, "DRAW_Z", {}):
+                                          "--behind", *_RBZ.DRAW_BEHIND[_zb]]})
+                _zz = _RBZ.cfg_key(getattr(_RBZ, "DRAW_Z", {}), _zn)
+                if _zz:
                     steps.append({"type": "cmd", "label": "绘制顺序 (z)",
                                   "cmd": [sys.executable, _sd, self.work, "--z",
                                           *[f"{k}={v:g}" for k, v in
-                                            _RBZ.DRAW_Z[_zn].items()]]})
+                                            _RBZ.DRAW_Z[_zz].items()]]})
             except Exception as _e:                     # noqa: BLE001
                 print("绘制顺序跳过:", _e)
             # 角色专属修补(和 rebuild_all.POST_FIX 同一份配置): 拆图会把一些东西弄坏,
@@ -1049,7 +1052,9 @@ class Main(QMainWindow):
             try:
                 import rebuild_all as _RB
                 _cname = os.path.basename(os.path.normpath(self.work))
-                for _sc in _RB.POST_FIX.get(_cname, []):
+                # cfg_key: 改名副本继承母本的专属修补链(魔神换名重拆丢 recut 的教训)
+                _ck = _RB.cfg_key(getattr(_RB, "POST_FIX", {}), _cname)
+                for _sc in _RB.POST_FIX.get(_ck, []):
                     # 路径/源图统一由 rebuild_all.prepare_args 展开: 配置里的
                     # output/<名字> 换成本次实际工作目录, 需要的脚本补 --src
                     # (app 拖入的素材不一定在 E:/pic, 不补就是"找不到源图")。
@@ -1082,7 +1087,8 @@ class Main(QMainWindow):
             # 现在挂成正式步骤, 排在 COMMON_POST 之后。
             try:
                 import rebuild_all as _RBL
-                for _sc in getattr(_RBL, "POST_FIX_LATE", {}).get(_cname, []):
+                _lk = _RBL.cfg_key(getattr(_RBL, "POST_FIX_LATE", {}), _cname)
+                for _sc in getattr(_RBL, "POST_FIX_LATE", {}).get(_lk, []):
                     _bits = _RBL.prepare_args(_sc, self.work, self.drop.path or "")
                     steps.append({"type": "cmd",
                                   "label": "精修 " + _bits[0].rstrip(".py"),

@@ -42,6 +42,10 @@ IMGS = {
     # app 里能拖进来拆, 这里不登记的话命令行 `rebuild_all.py fashu_hero_338` 会
     # 直接"跳过: 缺源图或 AI 分层", 两边就对不上了。
     "fashu_hero_338": "E:/pic/fashu_hero_338.png",
+    # 魔神的用户改图版(只改了右手武器尖端 x[284,306] y[272,295]), 用来重拆验证。
+    # 只登记源图、不进 ORDER: 批量重建不碰它, 单名重建/继承母本配置可用。
+    "sprite_boss_moshen_white_336_tipfix_preview":
+        "E:/pic/sprite_boss_moshen_white_336_tipfix_preview.png",
 }
 ORDER = ["sprite_boss_dongzhuo_white_336", "sprite_boss_huaxiong_white_336",
          "sprite_boss_moshen_white_336", "sprite_pi_white_336",
@@ -142,6 +146,21 @@ POST_FIX_LATE = {"sprite_boss_dongzhuo_white_336": [
 # 但 app 里拖进来的图可能在任意目录 —— 所以 app 会显式补 --src, 这里列出可补的脚本。
 SRC_OK = {"fix_zombie_head.py", "repair_scarf_v2.py", "merge_fan_smoke.py",
           "fill_gaps.py"}
+
+
+def cfg_key(table, name):
+    """角色配置键解析: 精确匹配优先, 否则最长的"母本前缀"命中。
+
+    用户把源图改名另存(如 sprite_boss_moshen_white_336_tipfix_preview.png,
+    改了武器尖想重拆验证)后, 目录名跟着文件名走 —— 写死角色全名的专属配置
+    (武器重切/挖头/绘制顺序)一个都不会命中, 拆出来的就是坏形态: 武器糊在
+    手臂里、腿横跨整个下半身、靴尖成了游离碎块挂在 leg_R_low。
+    所以改名字副本继承母本配置; 命中不到返回 None。
+    """
+    if name in table:
+        return name
+    hits = [k for k in table if name.startswith(k)]
+    return max(hits, key=len) if hits else None
 
 
 def prepare_args(script, work=None, src=""):
@@ -248,7 +267,8 @@ def one(name, no_split=False):
                  "--src", layers, "--out", os.path.join(work, "parts"),
                  "--orig-image", src, "--head-wear", mode,
                  "--drop-parts", DROP_PARTS]
-    if name in CARVE_HEAD:
+    _ck = cfg_key(CARVE_HEAD, name)
+    if _ck:
         split_cmd.append("--carve-head")
     ok = run(split_cmd, "拆图")
     if not ok:
@@ -256,13 +276,16 @@ def one(name, no_split=False):
 
     shutil.copy2(os.path.join(work, "parts", "coords.json"), cp)
 
-    if name in DRAW_BEHIND:
+    _kb = cfg_key(DRAW_BEHIND, name)
+    if _kb:
         run([sys.executable, os.path.join(HERE, "set_draw_order.py"), work,
-             "--behind", *DRAW_BEHIND[name]], "绘制顺序")
-    if name in DRAW_Z:
+             "--behind", *DRAW_BEHIND[_kb]], "绘制顺序")
+    _kz = cfg_key(DRAW_Z, name)
+    if _kz:
         run([sys.executable, os.path.join(HERE, "set_draw_order.py"), work,
-             "--z", *[f"{k}={v:g}" for k, v in DRAW_Z[name].items()]], "绘制顺序")
-    for script in POST_FIX.get(name, []):
+             "--z", *[f"{k}={v:g}" for k, v in DRAW_Z[_kz].items()]], "绘制顺序")
+    _kf = cfg_key(POST_FIX, name)
+    for script in POST_FIX.get(_kf, []):
         bits = prepare_args(script, work, src)
         run([sys.executable, os.path.join(HERE, bits[0])] + bits[1:], script)
 
@@ -272,7 +295,8 @@ def one(name, no_split=False):
             {"clear": "清残片", "bleed": "出血", "trim": "修边"}.get(
                 _sc.split("_")[0], "合并碎片"))
 
-    for script in POST_FIX_LATE.get(name, []):
+    _kl = cfg_key(POST_FIX_LATE, name)
+    for script in POST_FIX_LATE.get(_kl, []):
         bits = prepare_args(script, work, src)
         run([sys.executable, os.path.join(HERE, bits[0])] + bits[1:], script)
 
