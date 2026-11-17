@@ -2689,6 +2689,37 @@ def main():
         except Exception as ex:                            # noqa: BLE001
             print(f"  头饰修整跳过: {ex}")
 
+    _maybe_carve_head(os.path.dirname(os.path.abspath(args.out)))
+
+
+def _maybe_carve_head(root):
+    """角色目录有 carve_head.json 时, 拆图收尾自动把混进躯干的整颗头并回 head。
+
+    有些角色 see-through 会把头盔/金发/脸整颗判给 topwear, 静止合成看不出来,
+    头一转就在躯干上留一顶盔。手工跑 carve_full_head.py 修好后, 一旦重新拆图
+    就会被覆盖 —— 所以把修正参数放在 parts 的上级目录(拆图不会删), 收尾自动重放。
+    必须排在 fix_headwear 之后: 头饰修整会重写 parts/coords.json。
+    """
+    cf = os.path.join(root, "carve_head.json")
+    if not os.path.isfile(cf):
+        # 也可以放 config/<角色名>/ 下随仓库走 —— output/ 被整目录清掉时仍在。
+        cf = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "config", os.path.basename(root), "carve_head.json")
+    if not os.path.isfile(cf):
+        return
+    try:
+        spec = json.load(open(cf, encoding="utf-8"))
+        if not spec.get("enabled", True):
+            return
+        import carve_full_head
+        n = carve_full_head.apply(
+            root, curve=spec.get("curve"), targets=spec.get("parts"),
+            yellow_band=spec.get("yellow_band", True))
+        print(f"  头部归位: 挖掉 {n}px" +
+              (" (已修好, 无需改动)" if n == 0 else ""))
+    except Exception as ex:                                # noqa: BLE001
+        print(f"  头部归位跳过: {ex}")
+
 
 if __name__ == "__main__":
     main()

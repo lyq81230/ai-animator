@@ -14,11 +14,16 @@
 用法:
     python carve_full_head.py <角色目录> [--curve 60,0,75,85,...]
                               [--parts topwear,arm_upper_L,arm_upper_R]
-                              [--dry] [--apply] [--preview 对比图.png]
+                              [--no-yellow] [--apply] [--preview 对比图.png]
 
 默认只预览不落盘; 确认预览后加 --apply 才正式写入。
-会自动备份被改的 png 为 <name>.png.bak_head, 并同步 parts/ 与上层的
+被改的 png 备份到 <角色目录>/_carve_backup/, 并同步 parts/ 与上层的
 两份 coords.json。
+
+拆图自动生效: 在 <角色目录>/carve_head.json(parts 的上级, 重新拆图不会删)
+或 config/<角色名>/carve_head.json(随仓库走, output 被清空也还在) 放:
+    {"enabled": true, "curve": [...], "parts": [...]}
+build_from_seethrough.py 收尾会读它并调用 apply(), 这样重新拆图不会把修正冲掉。
 """
 import json
 import os
@@ -85,7 +90,7 @@ def head_mask(c, Z, H, W, yellow_extra=True):
     return m
 
 
-def crop_write(parts_dir, p, c, co):
+def crop_write(parts_dir, p, c, co, bak_dir=None):
     """把画布 RGBA 裁回部件窗口, 落盘并更新 coords 记录。"""
     al = c[..., 3] > 20
     if not al.any():
@@ -94,7 +99,9 @@ def crop_write(parts_dir, p, c, co):
     x0, y0, x1, y1 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
     sub = c[y0:y1, x0:x1]
     f = os.path.join(parts_dir, p.get("image", p["name"] + ".png"))
-    bak = f + ".bak_head"
+    bak_dir = bak_dir or parts_dir
+    os.makedirs(bak_dir, exist_ok=True)
+    bak = os.path.join(bak_dir, os.path.basename(f))
     if not os.path.isfile(bak) and os.path.isfile(f):
         shutil.copyfile(f, bak)
     Image.fromarray(sub).save(f)
@@ -106,32 +113,33 @@ def crop_write(parts_dir, p, c, co):
     return True
 
 
-def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    if not args:
-        print(__doc__)
-        return 1
-    D = args[0]
-    flags = sys.argv[1:]
-    # 破坏性脚本: 默认只预览, 必须显式 --apply 才写盘
-    dry = "--apply" not in flags
-    curve = DEFAULT_CURVE
-    targets = list(DEFAULT_PARTS)
-    preview = None
-    for i, f in enumerate(flags):
-        if f.startswith("--curve="):
-            curve = [float(v) for v in f.split("=", 1)[1].split(",")]
-        elif f.startswith("--parts="):
-            targets = [v.strip() for v in f.split("=", 1)[1].split(",")]
-        elif f == "--preview" and i + 1 < len(flags):
-            preview = flags[i + 1]
+def _migrate_old_backups(parts_dir, bak_dir):
+    """把老版本留在 parts/ 里的 *.png.bak_head 挪到 _carve_backup/。"""
+    for _f in sorted(os.listdir(parts_dir)):
+        if not _f.endswith(".bak_head"):
+            continue
+        src = os.path.join(parts_dir, _f)
+        dst = os.path.join(bak_dir, _f[:-len(".bak_head")])
+        if not os.path.isfile(dst):
+            shutil.move(src, dst)
+        else:
+            os.remove(src)
 
+
+def apply(D, curve=None, targets=None, yellow_band=True,
+          preview=None, dry=False):
+    """执行一次头部归位。dry=True 只算不写盘(命令行入口默认如此)。
+
+    返回本次从身体层挖掉的像素总数。重跑已修好的目录会返回 0, 不会破坏结果。
+    """
+    curve = list(curve) if curve else list(DEFAULT_CURVE)
+    targets = list(targets) if targets else list(DEFAULT_PARTS)
     parts_dir, cp, co, W, H, canv = read_parts(D)
     Z = zone(H, W, curve)
     pmap = {p["name"]: p for p in co["parts"]}
     if "head" not in pmap:
-        print("没有 head 部件")
-        return 1
+        print("没有 head 部件, 跳过")
+        return 0
 
     # 1) 挖掉身体部件里落在头部区域的像素。
     #    taken 只用来决定"这一格的颜色由谁并回 head"(避免重复叠加),
@@ -142,7 +150,7 @@ def main():
         if n not in canv or n in KEEP:
             continue
         c = canv[n].copy()
-        clear = head_mask(c, Z, H, W)
+        clear = head_mask(c, Z, H, W, yellow_extra=yellow_band)
         m = clear & ~taken          # 该部件负责并回 head 的那部分
         taken |= clear
         c[clear] = 0                # 整块挖掉, 含与别人重叠的副本
@@ -156,13 +164,16 @@ def main():
         sel = m & ~hm
         head[sel] = canv[n][sel]     # 颜色取原部件
         hm |= sel
-    print(f"  head: 补入 {int((taken & (canv['head'][..., 3] <= 20)).sum())}px, "
-          f"共 {int((head[..., 3] > 20).sum())}px")
+    added = int((taken & (canv["head"][..., 3] <= 20)).sum())
+    print(f"  head: 补入 {added}px, 共 {int((head[..., 3] > 20).sum())}px")
 
     if not dry:
+        bak_dir = os.path.join(D, "_carve_backup")
+        os.makedirs(bak_dir, exist_ok=True)
+        _migrate_old_backups(parts_dir, bak_dir)
         for n, (c, _m) in outs.items():
-            crop_write(parts_dir, pmap[n], c, co)
-        crop_write(parts_dir, pmap["head"], head, co)
+            crop_write(parts_dir, pmap[n], c, co, bak_dir)
+        crop_write(parts_dir, pmap["head"], head, co, bak_dir)
         for path in (cp, os.path.join(D, "coords.json")):
             if os.path.isfile(path):
                 json.dump(co, open(path, "w", encoding="utf-8"),
@@ -172,11 +183,36 @@ def main():
         print("  未指定 --apply: 仅预览, 未修改任何文件")
 
     if preview:
-        build_preview(D, co, W, H, canv, outs, head, preview, dry)
+        build_preview(co, W, H, canv, outs, head, preview)
+    return int(taken.sum())
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not args:
+        print(__doc__)
+        return 1
+    D = args[0]
+    flags = sys.argv[1:]
+    # 破坏性脚本: 默认只预览, 必须显式 --apply 才写盘
+    dry = "--apply" not in flags
+    curve = targets = None
+    yellow_band = True
+    preview = None
+    for i, f in enumerate(flags):
+        if f.startswith("--curve="):
+            curve = [float(v) for v in f.split("=", 1)[1].split(",")]
+        elif f.startswith("--parts="):
+            targets = [v.strip() for v in f.split("=", 1)[1].split(",")]
+        elif f == "--no-yellow":
+            yellow_band = False
+        elif f == "--preview" and i + 1 < len(flags):
+            preview = flags[i + 1]
+    apply(D, curve, targets, yellow_band, preview, dry)
     return 0
 
 
-def build_preview(D, co, W, H, canv, outs, head, path, dry):
+def build_preview(co, W, H, canv, outs, head, path):
     """左边=原合成, 中=新合成, 右=挖完的 topwear 单图。"""
     from PIL import ImageDraw
     order = [p["name"] for p in co["parts"]]

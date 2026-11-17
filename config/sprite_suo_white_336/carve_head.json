@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "note": "see-through 把整颗头(头盔/帽檐/金发/脸)判给了 topwear，arm_upper_L 里还有一份帽檐副本；拆图收尾自动并回 head，避免重新拆图冲掉修正。",
+  "curve": [60, 0, 75, 85, 95, 96, 108, 117, 175, 117, 188, 100, 210, 84, 230, 0],
+  "parts": ["topwear", "arm_upper_L", "arm_upper_R"],
+  "yellow_band": true
+}
