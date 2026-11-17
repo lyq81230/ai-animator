@@ -1035,17 +1035,27 @@ def build_skeleton(parts, cw, ch, args):
             # 看着像"刀尖没跟手"。
             hand = sk.get(f"arm_{label}_hand")
             fp = next((pp for (pp, bd) in chain if pp["name"] == target), None)
-            if hand is not None:
+            # 只有"跟手/跟小臂"的道具(握在拳头里的武器)才挂手骨。follow_part
+            # 指向大臂的挂件(肩甲/护领)必须挂大臂骨 —— 挂手骨的话会被手的
+            # 位移(±2.4px)+前臂摆动(±4.6°)拽着跑, 挂件一端与身体分离
+            # (dongzhuo 的肩甲 overlay 就是这样"一端分离"的)。
+            _handish = (fp is not None
+                        and any(k in str(fp.get("name", "")).lower()
+                                for k in ("hand", "fore")))
+            if hand is not None and _handish:
                 parent = hand
                 gx, gy = (_closest_pair_joint(fp["v_spine"], p["v_spine"])
                           if fp is not None else (hand.wx, hand.wy))
             else:
-                tp = next((pp for (pp, bd) in chain if bd is hit), None)
-                if tp is not None:
-                    gx, gy = _closest_pair_joint(tp["v_spine"], p["v_spine"])
-                else:
-                    gx, gy = hit.wx, hit.wy
                 parent = hit
+                if fp is not None:
+                    gx, gy = _closest_pair_joint(fp["v_spine"], p["v_spine"])
+                else:
+                    tp = next((pp for (pp, bd) in chain if bd is hit), None)
+                    if tp is not None:
+                        gx, gy = _closest_pair_joint(tp["v_spine"], p["v_spine"])
+                    else:
+                        gx, gy = hit.wx, hit.wy
             pb = sk.add(f"prop_{p['name']}", parent, float(gx), float(gy))
             chain.append((p, pb))       # 权重按 setup 世界坐标算, 位置不变形
             print(f"  道具 {p['name']} 跟随 {target}（独立骨, 父骨 {parent.name}, "
