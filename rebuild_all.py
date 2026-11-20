@@ -131,7 +131,10 @@ POST_FIX_LATE = {
     # (内容是原画的暗色阴影, 游戏深色背景下几乎不可见)。
     "sprite_boss_lvbu_white_336": [
         "move_rect.py output/sprite_boss_lvbu_white_336 "
-        "--from topwear --rect 128,205,136,260 --delete"],
+        "--from topwear --rect 128,205,136,260 --delete",
+        # 武器杆的暗色描边带被 AI 判进 topwear —— 武器一摆, 暗色"杆影"留在
+        # 身上, 看着像武器部件残留。沿杆轴走廊搬回 objects_L(随武器走)。
+        "fix_lvbu_shaft.py output/sprite_boss_lvbu_white_336"],
     "sprite_boss_dongzhuo_white_336": [
     # AI 把左裙甲的一块甲片(310px, 带金钉)判进了 sword 层 —— 武器跟手骨甩,
     # 甲片留在武器上就是"剑带了块盔甲"。甲片与剑身单连通(move_island 的
