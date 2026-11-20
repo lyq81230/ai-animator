@@ -594,18 +594,22 @@ def load_rigid(coords_path):
 
 
 def load_rig_params(coords_path):
-    """读 rig.json 的 {"params": {...}} —— 按角色参数校准(可选)。
+    """读 rig.json 的按角色校准(可选), 返回 {"params": {...}, "prop_pivot": {...}}:
 
-    app/命令行对每个角色都传同一套默认参数, 但个别角色需要微调: 大头重盔的
-    boss 头部随步位移/点头/扭身全按默认走, 看着就是"头在身上飘"。参数在
-    parse 之后覆盖 args, CLI 与 app 两边自动一致, 优先级最高。
+        {"params": {"head-turn": 0.2, ...}}      -- 参数覆盖(parse 后覆盖 args)
+        {"prop_pivot": {"objects": [103, 228]}}  -- 道具握点显式指定(canvas 坐标,
+                                                    y 向下; 握点启发式在武器与
+                                                    手臂平行重叠的拆图上不可靠)
+
+    app/命令行两边自动一致, 优先级最高。
     """
     path = os.path.join(os.path.dirname(os.path.abspath(coords_path)), "rig.json")
     if not os.path.isfile(path):
         return {}
     try:
         d = json.load(open(path, encoding="utf-8"))
-        return d.get("params") or {}
+        return {"params": d.get("params") or {},
+                "prop_pivot": d.get("prop_pivot") or {}}
     except Exception as _e:                            # noqa: BLE001
         print(f"  rig.json params 读取失败: {_e}")
         return {}
@@ -1056,6 +1060,15 @@ def build_skeleton(parts, cw, ch, args):
                         gx, gy = _closest_pair_joint(tp["v_spine"], p["v_spine"])
                     else:
                         gx, gy = hit.wx, hit.wy
+            # rig.json 显式握点覆盖: {"prop_pivot": {"objects": [103, 228]}}
+            # (canvas 坐标, y 向下)。最近点对启发式在"武器与手臂平行重叠"的
+            # 拆图上会取到柄顶/前臂顶端而不是拳头 —— 华雄的剑就是这样
+            # (启发式给 (91,187), 真实握点 (103,225), 差 40px, 一摆就脱手)。
+            _pv = (getattr(args, "_rig_params", {}) or {}).get("prop_pivot") or {}
+            if p["name"] in _pv:
+                _cx, _cy = _pv[p["name"]]
+                gx, gy = float(_cx), float(ch - _cy)
+                print(f"  握点 rig 覆盖: ({gx:.0f},{gy:.0f})")
             pb = sk.add(f"prop_{p['name']}", parent, float(gx), float(gy))
             chain.append((p, pb))       # 权重按 setup 世界坐标算, 位置不变形
             print(f"  道具 {p['name']} 跟随 {target}（独立骨, 父骨 {parent.name}, "
@@ -3136,8 +3149,9 @@ def main():
 
     args._markers = load_bone_markers(args.bones_json, args.coords, ch)
     args._rigid = load_rigid(args.coords)
+    args._rig_params = load_rig_params(args.coords)
     # 按角色参数校准(rig.json {"params": {...}}): 覆盖命令行/默认值, 两边一致
-    for _k, _v in load_rig_params(args.coords).items():
+    for _k, _v in load_rig_params(args.coords)["params"].items():
         _attr = str(_k).strip().lstrip("-").replace("-", "_")
         if not _attr or not hasattr(args, _attr):
             print(f"  rig.json 参数 {_k} 不存在, 跳过")
