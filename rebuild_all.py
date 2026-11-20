@@ -125,7 +125,14 @@ POST_FIX = {"sprite_boss_lvbu_white_336": ["fix_lvbu_head.py"],
 # 邻居颜色, 刚切出来的东西会被它们重新糊回去(董卓的佩剑就被 bleed 糊回了半圈
 # 裙摆和甲片, harden_prop_rim 又把它压成不透明)。所以这类"要从原图上精确抠形"的
 # 处理放在最后。
-POST_FIX_LATE = {"sprite_boss_dongzhuo_white_336": [
+POST_FIX_LATE = {
+    # lvbu: 身体左缘、紧贴武器 bbox 的那条暗色轮廓带(272px, 裙甲边缘阴影)
+    # 在部件图里孤立成一条"棍状"残影, 武器一摆就像"柄留在身上" —— 删掉
+    # (内容是原画的暗色阴影, 游戏深色背景下几乎不可见)。
+    "sprite_boss_lvbu_white_336": [
+        "move_rect.py output/sprite_boss_lvbu_white_336 "
+        "--from topwear --rect 128,205,136,260 --delete"],
+    "sprite_boss_dongzhuo_white_336": [
     # AI 把左裙甲的一块甲片(310px, 带金钉)判进了 sword 层 —— 武器跟手骨甩,
     # 甲片留在武器上就是"剑带了块盔甲"。甲片与剑身单连通(move_island 的
     # 洪泛会把剑一起搬走), 用 move_rect 按画布矩形搬: 矩形避开上方护手

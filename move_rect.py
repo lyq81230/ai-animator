@@ -23,15 +23,19 @@ from PIL import Image
 
 def main():
     D = sys.argv[1]
+    delete = "--delete" in sys.argv
     src_name = sys.argv[sys.argv.index("--from") + 1]
-    to_name = sys.argv[sys.argv.index("--to") + 1]
+    to_name = None
+    if not delete:
+        to_name = sys.argv[sys.argv.index("--to") + 1]
     x0, y0, x1, y1 = (int(v) for v in
                       sys.argv[sys.argv.index("--rect") + 1].split(","))
     cp = os.path.join(D, "coords.json")
     co = json.load(open(cp, encoding="utf-8"))
     W, H = co["canvas"]["w"], co["canvas"]["h"]
     by = {p["name"]: p for p in co["parts"]}
-    for n in (src_name, to_name):
+    need = (src_name,) if delete else (src_name, to_name)
+    for n in need:
         if n not in by:
             print(f"没有部件 {n}")
             return 1
@@ -50,6 +54,33 @@ def main():
             os.path.join(D, "parts", p["image"]))
         p.update({"x": p["x"] + x0_, "y": p["y"] + y0_,
                   "width": x1_ - x0_, "height": y1_ - y0_})
+
+    if delete:
+        ps = by[src_name] if src_name in by else None
+        if ps is None:
+            print("没有部件", src_name)
+            return 1
+        a_s = load(ps)
+        moved = 0
+        for cy in range(max(y0, 0), min(y1, H)):
+            for cx in range(max(x0, 0), min(x1, W)):
+                ly, lx = cy - ps["y"], cx - ps["x"]
+                if not (0 <= ly < a_s.shape[0] and 0 <= lx < a_s.shape[1]):
+                    continue
+                if a_s[ly, lx, 3] <= 8:
+                    continue
+                a_s[ly, lx] = 0
+                moved += 1
+        paste(ps, a_s)
+        print(f"  删除 {moved}px: {src_name} (rect {x0},{y0},{x1},{y1})")
+        json.dump(co, open(cp, "w", encoding="utf-8"), ensure_ascii=False,
+                  indent=2)
+        pc = os.path.join(D, "parts", "coords.json")
+        if os.path.isfile(pc):
+            json.dump(co, open(pc, "w", encoding="utf-8"),
+                      ensure_ascii=False, indent=2)
+        print("完成")
+        return 0
 
     ps, pt = by[src_name], by[to_name]
     a_s, a_t = load(ps), load(pt)
