@@ -1023,59 +1023,76 @@ def build_skeleton(parts, cw, ch, args):
     #      把它放在肘部, 结果手随缩短往上收、刀还留在肘那儿, 看着就是"武器没跟手"。
     # 位置放在手骨(wx,wy)、父骨仍是小臂, 是为了继承小臂的旋转与位移; 缩放由
     # 动画里写字骨 scale = 1/父骨链缩放 抵消。
+    def _follow_variants(t):
+        """follow 指向的部件可能已被 drop —— 同侧降级候选。
+        华雄: AI 把剑复制进了 arm_fore_L/arm_hand_L, drop 后 L 链只剩
+        arm_upper_L, follow=arm_fore_L 要降级到 arm_upper_L。"""
+        outs = [t]
+        for a, b in (("fore", "hand"), ("fore", "upper"), ("hand", "fore"),
+                     ("hand", "upper"), ("upper", "fore"), ("upper", "hand")):
+            if a in t and t.replace(a, b) not in outs:
+                outs.append(t.replace(a, b))
+        return outs
+
     for p in [x for x in parts if x.get("follow")]:
         target = p["follow"]
+        hit = fp = chain = label = None
+        used = None
         for (label, chain) in arm_chains:
-            hit = next((bd for (pp, bd) in chain if pp["name"] == target), None)
-            if hit is None:
-                continue
-            # 握点/父骨: 父骨挂手骨(继承整条手臂的运动); 位置放在
-            # 【武器与跟随部件轮廓最近的一对点】= 真正被拳头攥住的位置。
-            # 不能用腕骨原点: 斧/杖的杆在拳头下方, 拳心离腕骨差几十 px
-            # (lvbu 差 26px), 武器绕腕转时杆在拳头里滑动、杆上端在前臂
-            # 后缘探出/缩进 —— 看着就是"武器折断"。绕握点转, 拳头里那段
-            # 杆不动, 只有梢甩。没有手骨就用同一条最近点对当握把 —— 之前
-            # 固定用 hit 的骨原点(=肩/肘), 刀就绕肩膀转, 尖端甩得最远,
-            # 看着像"刀尖没跟手"。
-            hand = sk.get(f"arm_{label}_hand")
-            fp = next((pp for (pp, bd) in chain if pp["name"] == target), None)
-            # 只有"跟手/跟小臂"的道具(握在拳头里的武器)才挂手骨。follow_part
-            # 指向大臂的挂件(肩甲/护领)必须挂大臂骨 —— 挂手骨的话会被手的
-            # 位移(±2.4px)+前臂摆动(±4.6°)拽着跑, 挂件一端与身体分离
-            # (dongzhuo 的肩甲 overlay 就是这样"一端分离"的)。
-            _handish = (fp is not None
-                        and any(k in str(fp.get("name", "")).lower()
-                                for k in ("hand", "fore")))
-            if hand is not None and _handish:
-                parent = hand
-                gx, gy = (_closest_pair_joint(fp["v_spine"], p["v_spine"])
-                          if fp is not None else (hand.wx, hand.wy))
-            else:
-                parent = hit
-                if fp is not None:
-                    gx, gy = _closest_pair_joint(fp["v_spine"], p["v_spine"])
-                else:
-                    tp = next((pp for (pp, bd) in chain if bd is hit), None)
-                    if tp is not None:
-                        gx, gy = _closest_pair_joint(tp["v_spine"], p["v_spine"])
-                    else:
-                        gx, gy = hit.wx, hit.wy
-            # rig.json 显式握点覆盖: {"prop_pivot": {"objects": [103, 228]}}
-            # (canvas 坐标, y 向下)。最近点对启发式在"武器与手臂平行重叠"的
-            # 拆图上会取到柄顶/前臂顶端而不是拳头 —— 华雄的剑就是这样
-            # (启发式给 (91,187), 真实握点 (103,225), 差 40px, 一摆就脱手)。
-            _pv = (getattr(args, "_rig_params", {}) or {}).get("prop_pivot") or {}
-            if p["name"] in _pv:
-                _cx, _cy = _pv[p["name"]]
-                gx, gy = float(_cx), float(ch - _cy)
-                print(f"  握点 rig 覆盖: ({gx:.0f},{gy:.0f})")
-            pb = sk.add(f"prop_{p['name']}", parent, float(gx), float(gy))
-            chain.append((p, pb))       # 权重按 setup 世界坐标算, 位置不变形
-            print(f"  道具 {p['name']} 跟随 {target}（独立骨, 父骨 {parent.name}, "
-                  f"握点 ({gx:.0f},{gy:.0f})）")
-            break
+            for t in _follow_variants(target):
+                hh = next((bd for (pp, bd) in chain if pp["name"] == t), None)
+                if hh is not None:
+                    hit, used = hh, t
+                    fp = next((pp for (pp, bd) in chain if pp["name"] == t),
+                              None)
+                    break
+            if hit is not None:
+                break
+        if hit is None:
+            print(f"  道具 {p['name']}: 找不到 {target} 及同侧变体, 保持贴躯干")
+            continue
+        target = used
+        # 握点/父骨: 父骨挂手骨(继承整条手臂的运动); 位置放在
+        # 【武器与跟随部件轮廓最近的一对点】= 真正被拳头攥住的位置。
+        # 不能用腕骨原点: 斧/杖的杆在拳头下方, 拳心离腕骨差几十 px
+        # (lvbu 差 26px), 武器绕腕转时杆在拳头里滑动 —— 看着就是"武器折断"。
+        # rig.json 可用 prop_pivot 显式覆盖(武器与手臂平行重叠时启发式不可靠)。
+        hand = sk.get(f"arm_{label}_hand")
+        fp = next((pp for (pp, bd) in chain if pp["name"] == target), None)
+        # 只有"跟手/跟小臂"的道具(握在拳头里的武器)才挂手骨。follow_part
+        # 指向大臂的挂件(肩甲/护领)必须挂大臂骨 —— 挂手骨的话会被手的
+        # 位移(±2.4px)+前臂摆动(±4.6°)拽着跑, 挂件一端与身体分离
+        # (dongzhuo 的肩甲 overlay 就是这样"一端分离"的)。
+        _handish = (fp is not None
+                    and any(k in str(fp.get("name", "")).lower()
+                            for k in ("hand", "fore")))
+        if hand is not None and _handish:
+            parent = hand
+            gx, gy = (_closest_pair_joint(fp["v_spine"], p["v_spine"])
+                      if fp is not None else (hand.wx, hand.wy))
         else:
-            print(f"  道具 {p['name']}: 找不到 {target}, 保持贴躯干")
+            parent = hit
+            if fp is not None:
+                gx, gy = _closest_pair_joint(fp["v_spine"], p["v_spine"])
+            else:
+                tp = next((pp for (pp, bd) in chain if bd is hit), None)
+                if tp is not None:
+                    gx, gy = _closest_pair_joint(tp["v_spine"], p["v_spine"])
+                else:
+                    gx, gy = hit.wx, hit.wy
+        # rig.json 显式握点覆盖: {"prop_pivot": {"objects": [103, 190]}}
+        # (canvas 坐标, y 向下)。最近点对启发式在"武器与手臂平行重叠"的
+        # 拆图上会取到柄顶/前臂顶端而不是拳头 —— 华雄的剑就是这样
+        # (启发式给 (91,187), 真实握点 (103,190), 差 40px, 一摆就脱手)。
+        _pv = (getattr(args, "_rig_params", {}) or {}).get("prop_pivot") or {}
+        if p["name"] in _pv:
+            _cx, _cy = _pv[p["name"]]
+            gx, gy = float(_cx), float(ch - _cy)
+            print(f"  握点 rig 覆盖: ({gx:.0f},{gy:.0f})")
+        pb = sk.add(f"prop_{p['name']}", parent, float(gx), float(gy))
+        chain.append((p, pb))       # 权重按 setup 世界坐标算, 位置不变形
+        print(f"  道具 {p['name']} 跟随 {target}（独立骨, 父骨 {parent.name}, "
+              f"握点 ({gx:.0f},{gy:.0f})）")
 
     # ---- 腿: 每条腿 髋 -> 膝 -> 踝 三节骨, 髋挂 torso 下 ----
     # 一条腿是一整块网格, 沿高度做权重渐变就能在膝盖处平滑弯, 不需要切片。
